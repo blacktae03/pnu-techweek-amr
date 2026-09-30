@@ -176,6 +176,13 @@ class TargetDetector:
         x = pose[0] + d_row * math.cos(pose[2] + bearing); y = pose[1] + d_row * math.sin(pose[2] + bearing)
         if any(math.hypot(x - a, y - b) < CANDIDATE_MERGE_RADIUS for a, b in self.targets + self.investigated + self.candidates):
             return
+        # 반쯤 가린 사과는 원형도만 떨어지고 전체 물체 비율은 0.4~2.5 안에 남는다. 3차 실행 첫 후보: 비율 28.9(가구/카펫 띠) → 9 s 낭비.
+        try:
+            w_obj, h_obj = vision.object_extent(mask, cx, cy, r)
+            if not (0.4 <= h_obj / w_obj <= 2.5) or vision.red_outside_blob(mask, cx, cy, r) > 0.5:
+                return
+        except Exception:
+            return
         self.candidates.append((x, y))
         # 왜 형태 검사에 떨어졌는지 기록 (원형도·전체 물체 비율·위아래 같은 색 비율) — 임계값 문제인지 가림인지 판별용
         try:
