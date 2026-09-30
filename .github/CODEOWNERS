@@ -1,0 +1,11 @@
+# 브랜치별 소유 파일. PR 이 이 파일을 건드리면 해당 소유자의 리뷰가 필요하다 (GitHub 이 자동 지정).
+# 사용자명은 팀원 GitHub 계정으로 바꿀 것.
+grid_nav/vision.py              @blacktae03
+grid_nav/frontier.py            @blacktae03
+grid_nav/occupancy_grid.py      @blacktae03
+grid_nav/astar.py               @blacktae03
+grid_nav/dwa.py                 @TEAMMATE_B1
+grid_nav/localization.py        @TEAMMATE_B2
+grid_nav/webots_adapter.py      @blacktae03 @TEAMMATE_B1 @TEAMMATE_B2
+controllers/tb3_gridnav/        @blacktae03
+worlds/                         @blacktae03

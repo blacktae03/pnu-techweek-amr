@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.venv*/
+.omc/
+controllers/*/map.npz
+controllers/*/cam.jpg
+controllers/*/det_*.jpg
+worlds/.*.wbproj
+*.png
+!protos/icons/*.png
+models/
+.DS_Store
