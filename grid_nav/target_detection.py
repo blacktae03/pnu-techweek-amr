@@ -31,6 +31,11 @@ CONFIRM_FRAMES = 2          # 연속 프레임 수 이상 보여야 확정 (한 
 # 비(非)대상 사과 = 장애물. 사과(지름 10 cm, 중심 5 cm)는 LiDAR 평면(17 cm) 아래라 지도에 안 찍혀 로봇이 치고 지나간다
 # (B조 실행: 보라 사과 충돌). 같은 색·원형도 검사로 찾아 지도에 장애물로 등록한다. 빨간 사과 판정 로직은 건드리지 않는다.
 OBSTACLE_COLORS = ("green", "orange", "purple")
+# 빨간 '후보': 색은 맞는데 형태 검사(원형도·비율)에 떨어진 바닥 위 빨간 덩어리. 가구에 반쯤 가린 사과가 여기 걸린다
+# (2차 실행: 빨간 사과 2.0~2.5 m 정면에서 미탐지, 완주 3회는 모두 0.8~0.9 m 에서만 탐지). 어댑터가 1 m 앞까지 가서 다시 본다.
+CANDIDATE_MIN_RADIUS_PX = 4.0
+CANDIDATE_MAX_DIST = 3.5
+CANDIDATE_MERGE_RADIUS = 1.0
 OBSTACLE_EVERY = 1          # 대상 색 처리(VISION_EVERY) 마다 장애물 색도 처리 (3색 ≈ 3 ms)
 OBSTACLE_CONFIRM_FRAMES = 1 # 비대상 사과는 1프레임 즉시 등록 (오등록은 통행 비용만 늘 뿐, 놓치면 충돌)
 OBSTACLE_MIN_RADIUS = 0.20  # 등록 반경 하한
@@ -93,6 +98,8 @@ class TargetDetector:
         self.obstacle_updates: List[Tuple[int, float, float, float]] = []   # (idx, x, y, radius) 어댑터가 지도에 찍을 큐
         self._obs_consec = {c: 0 for c in OBSTACLE_COLORS}
         self._obs_frames = 0
+        self.candidates: List[Tuple[float, float]] = []      # 조사할 빨간 후보 위치
+        self.investigated: List[Tuple[float, float]] = []    # 가까이서 봤는데 사과가 아니었던 후보
         self.obstacle_ms = None                                # 장애물 색 처리 1회 비용 [ms] (진단)
 
     def process(self, image_bytes, pose, t) -> Optional[Tuple[float, float]]:
@@ -133,6 +140,7 @@ class TargetDetector:
                         self.targets[idx] = (tx, ty); self._best_dist[idx] = dist
         if not accepted:
             self.consecutive = 0
+            self._note_candidate(bgr, pose)
         self._obs_frames += 1
         if self._obs_frames % OBSTACLE_EVERY == 0:
             self._detect_obstacle_apples(bgr, pose, t)
@@ -146,6 +154,46 @@ class TargetDetector:
             self.n_snapshots += 1
             vision.save_debug_frame(vision.draw_detection(bgr, det, self.color),
                                     os.path.join(self.debug_dir, f"det_{self.n_snapshots}.jpg"))
+
+    def _note_candidate(self, bgr, pose):
+        """정식 탐지가 없을 때, 가장 큰 빨간 덩어리가 바닥 위(수평선 아래)에 있으면 후보 위치를 기록한다.
+        거리는 화면 세로 위치(바닥 물체 가정)로 잰다 — 반쯤 가린 덩어리는 반지름이 틀리기 때문."""
+        try:
+            mask = vision.color_mask(bgr, self.color)
+            contours, _ = vision.cv2.findContours(mask, vision.cv2.RETR_EXTERNAL, vision.cv2.CHAIN_APPROX_SIMPLE)
+        except Exception:
+            return
+        if not contours:
+            return
+        c = max(contours, key=vision.cv2.contourArea)
+        (cx, cy), r = vision.cv2.minEnclosingCircle(c)
+        if r < CANDIDATE_MIN_RADIUS_PX or cy < self.cam_h / 2 + HORIZON_MARGIN_PX:
+            return
+        d_row = distance_from_row(cy, self.cam_h, self.cam_w, self.cam_fov)
+        if not (0.3 < d_row <= CANDIDATE_MAX_DIST):
+            return
+        _, bearing, _ = target_world_from_pixel(pose, cx, r, self.cam_w, self.cam_fov)
+        x = pose[0] + d_row * math.cos(pose[2] + bearing); y = pose[1] + d_row * math.sin(pose[2] + bearing)
+        if any(math.hypot(x - a, y - b) < CANDIDATE_MERGE_RADIUS for a, b in self.targets + self.investigated + self.candidates):
+            return
+        self.candidates.append((x, y))
+        # 왜 형태 검사에 떨어졌는지 기록 (원형도·전체 물체 비율·위아래 같은 색 비율) — 임계값 문제인지 가림인지 판별용
+        try:
+            area = vision.cv2.contourArea(c); circ = area / (math.pi * r * r + 1e-6)
+            w_obj, h_obj = vision.object_extent(mask, cx, cy, r); outside = vision.red_outside_blob(mask, cx, cy, r)
+            info = f"원형도 {circ:.2f} 비율 {h_obj / w_obj:.2f} 밖빨강 {outside:.2f}"
+        except Exception:
+            info = "?"
+        print(f"[cand] 빨간 후보 기록: r={r:.0f}px 세로거리 {d_row:.2f} m → ({x:.2f}, {y:.2f}) [{info}]  (후보 {len(self.candidates)}개)")
+        if self.debug_dir and len(self.candidates) + len(self.investigated) <= 10:
+            vision.save_debug_frame(vision.draw_detection(bgr, (cx, cy, r), "cand"),
+                                    os.path.join(self.debug_dir, f"cand_{len(self.candidates) + len(self.investigated)}.jpg"))
+
+    def resolve_candidate(self, xy, found):
+        """후보를 조사 완료 처리. found=True 면 정식 탐지가 이미 targets 에 들어갔으니 목록에서만 제거."""
+        self.candidates = [c for c in self.candidates if c != xy]
+        if not found:
+            self.investigated.append(xy)
 
     @staticmethod
     def obstacle_radius(dist):

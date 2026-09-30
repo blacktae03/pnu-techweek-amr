@@ -248,6 +248,7 @@ def run(robot, start_pose, ground_truth=None, map_save_path="map.npy", map_save_
     marked_obstacles = 0                 # detector.obstacles 중 지도에 찍은 개수
     spin_until = -1e9; last_spin = -1e9; prev_goal = None; lookarounds = 0
     trail: List[Tuple[float, float, float]] = []   # (t, x, y) 최근 10 s 궤적 — 후진 허용 판정용
+    cand = None; cand_since = -1e9; cand_fail = 0; cand_look_until = -1e9   # 빨간 후보 조사 상태
     unsafe_backs = 0
 
     def back_is_safe(pose_):
@@ -379,7 +380,30 @@ def run(robot, start_pose, ground_truth=None, map_save_path="map.npy", map_save_
             last_plan_t = t
             if state == "EXPLORE" and visits.select(found_targets, pose, t) is not None:
                 state = "VISIT"; print(f"[{t:.1f}s] 미방문 사과 ID={visits.active} → VISIT")
-            if state == "EXPLORE":
+            if state in ("EXPLORE", "SEARCH") and cand is None and detector.candidates:
+                near_c = min(detector.candidates, key=lambda c_: math.dist(pose[:2], c_))
+                # 먼 후보로 이탈 금지: 현재 목표보다 가까울 때만 (동시에 1개, 후보당 1회)
+                if goal is None or math.dist(pose[:2], near_c) < math.dist(pose[:2], goal):
+                    cand = near_c; cand_since = t; cand_fail = 0
+                    print(f"[{t:.1f}s] 빨간 후보 ({cand[0]:.2f}, {cand[1]:.2f}) 조사 시작 → 1 m 앞까지 접근해 확인")
+            if cand is not None:
+                if any(math.dist(cand, tg) < 1.0 for tg in found_targets):
+                    detector.resolve_candidate(cand, True); print(f"[{t:.1f}s] 후보 → 사과 확정됨"); cand = None
+                elif t - cand_since > 60.0 or cand_fail >= 3:
+                    detector.resolve_candidate(cand, False); print(f"[{t:.1f}s] 후보 조사 포기(시간/경로) → 제외"); cand = None
+                else:
+                    d_c = math.dist(pose[:2], cand)
+                    if d_c > 1.0:
+                        ang_ = math.atan2(pose[1] - cand[1], pose[0] - cand[0])
+                        goal = (cand[0] + 0.9 * math.cos(ang_), cand[1] + 0.9 * math.sin(ang_))   # 후보에서 로봇 쪽으로 0.9 m
+                        cand_look_until = -1e9
+                    else:
+                        goal = None
+                        if cand_look_until < 0:
+                            cand_look_until = t + 4.0                    # 도착: 후보를 바라보며 4 s 관찰
+                        elif t >= cand_look_until:
+                            detector.resolve_candidate(cand, False); print(f"[{t:.1f}s] 후보 1 m 에서 4 s 관찰 — 사과 아님 → 제외"); cand = None
+            if state == "EXPLORE" and cand is None:
                 goal = planner.next_exploration_goal(pose, current_goal=goal)
                 if goal is None and planner.blacklist:
                     # 포기한 목표들 때문에 후보가 없어진 것이면 한 번 비우고 다시 고른다 (기준선: 정체 8회 → 블랙리스트 8개 →
@@ -399,7 +423,7 @@ def run(robot, start_pose, ground_truth=None, map_save_path="map.npy", map_save_
                             state = "BLOCKED"; print(f"[{t:.1f}s] 미션 미완료: 방문 {len(visits.completed)}/{TARGET_COUNT}, frontier·미확인 구역 모두 없음")
                 else:
                     no_frontier_count = 0
-            if state == "SEARCH":
+            if state == "SEARCH" and cand is None:
                 if visits.select(found_targets, pose, t) is not None:
                     state = "VISIT"; print(f"[{t:.1f}s] 수색 중 미방문 사과 ID={visits.active} → VISIT"); goal = None
                 else:
@@ -469,6 +493,8 @@ def run(robot, start_pose, ground_truth=None, map_save_path="map.npy", map_save_
                                          unknown_passable=True, cost_map=planner._cost)
                         if path is None and return_fail == 5:
                             print(f"[{t:.1f}s] 복귀 경로 없음 (미탐색 통과 허용해도) → 정지")
+                elif cand is not None:
+                    cand_fail += 1
                 else:
                     planner.give_up_goal(goal)
             else:
@@ -502,6 +528,9 @@ def run(robot, start_pose, ground_truth=None, map_save_path="map.npy", map_save_
             front = front[np.isfinite(front) & (front > 0.05)]
             if front.size and float(front.min()) < ROBOT_RADIUS + 0.05:
                 v = 0.0                                                          # 벽 코앞: 회전만
+        if cand is not None and state in ("EXPLORE", "SEARCH") and cand_look_until > 0 and t < cand_look_until:
+            err = wrap_angle(math.atan2(cand[1] - pose[1], cand[0] - pose[0]) - pose[2])
+            v, w = (0.0, float(np.clip(2.0 * err, -1.0, 1.0))) if abs(err) > math.radians(5) else (0.0, 0.0)
         if state in ("EXPLORE", "SEARCH") and t < spin_until:
             v, w = 0.0, LOOKAROUND_W                                              # 둘러보기: 제자리 회전 (카메라로 주변 훑기)
         if state == "CONFIRM":
@@ -561,7 +590,7 @@ def run(robot, start_pose, ground_truth=None, map_save_path="map.npy", map_save_
             err = f" 위치오차={math.hypot(pose[0] - gt[0], pose[1] - gt[1]):.2f}m" if gt else ""
             print(f"[{t:6.1f}s] {state:8s} pose=({pose[0]:.2f},{pose[1]:.2f},{math.degrees(pose[2]):.0f}°){err} "
                   f"목표={None if goal is None else (round(goal[0], 2), round(goal[1], 2))} 경로점={0 if not path else len(path)} "
-                  f"v={v:.2f} w={w:+.2f} 대상={len(found_targets)} 방문={len(visits.completed)}/{TARGET_COUNT} 헛바퀴={slip_events} 미확인칸={planner.unseen_cells} 둘러보기={lookarounds} DWA복구={motion.recoveries} 비상정지={motion.emergency_stops} 사과장애물={len(detector.obstacles)} 후진거부={unsafe_backs} 정적/동적점={len(motion._cached_obstacles[0])}/{len(motion._cached_obstacles[1])} 보정={estimator.corrections} 비바닥접촉={contact_events if contact_node else '미계측'} 비전거부={detector.rejected} 지도밖hit={planner.grid.dropped_hits}")
+                  f"v={v:.2f} w={w:+.2f} 대상={len(found_targets)} 방문={len(visits.completed)}/{TARGET_COUNT} 헛바퀴={slip_events} 미확인칸={planner.unseen_cells} 둘러보기={lookarounds} DWA복구={motion.recoveries} 비상정지={motion.emergency_stops} 사과장애물={len(detector.obstacles)} 후보={len(detector.candidates)}/{len(detector.investigated)} 후진거부={unsafe_backs} 정적/동적점={len(motion._cached_obstacles[0])}/{len(motion._cached_obstacles[1])} 보정={estimator.corrections} 비바닥접촉={contact_events if contact_node else '미계측'} 비전거부={detector.rejected} 지도밖hit={planner.grid.dropped_hits}")
 
 
 if __name__ == "__main__":
