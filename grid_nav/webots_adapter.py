@@ -42,6 +42,7 @@ except ImportError:
 TARGET_COUNT = 1            # 이 개수를 찾으면 탐색을 멈추고 방문 → 복귀. 당일 규칙에 맞출 것
 ARRIVE_DIST = ROBOT_RADIUS + 0.3   # 대상 "도착" 판정 거리 (당일 규칙 확인)
 HOME_DIST = 0.2             # 복귀 완료 판정
+HOLD_SECONDS = float(os.environ.get("GRIDNAV_HOLD", "0"))   # 테스트용: 처음 N초 정지
 
 
 # ======================================================================
@@ -212,8 +213,10 @@ def run(robot, start_pose, ground_truth=None, map_save_path="map.npy", map_save_
             if planner.grid.dropped_hits > 100:
                 print("!! 지도 밖 측정값 많음 → exploration.MAP_HALF_M 확인")
 
-        # (5) 속도 명령  [feat/dwa]
+        # (5) 속도 명령  [feat/dwa]   (환경변수 GRIDNAV_HOLD=초 를 주면 그동안 정지: 비전 테스트용)
         v, w = motion.command(pose, path, ranges, angles, state)
+        if t < HOLD_SECONDS:
+            v, w = 0.0, 0.0
         wl, wr = to_wheel_speeds(v, w)
         left_motor.setVelocity(wl); right_motor.setVelocity(wr)
 
@@ -237,7 +240,7 @@ def run(robot, start_pose, ground_truth=None, map_save_path="map.npy", map_save_
             err = f" 위치오차={math.hypot(pose[0] - gt[0], pose[1] - gt[1]):.2f}m" if gt else ""
             print(f"[{t:6.1f}s] {state:8s} pose=({pose[0]:.2f},{pose[1]:.2f},{math.degrees(pose[2]):.0f}°){err} "
                   f"목표={None if goal is None else (round(goal[0], 2), round(goal[1], 2))} 경로점={0 if not path else len(path)} "
-                  f"v={v:.2f} w={w:+.2f} 대상={len(found_targets)} 지도밖hit={planner.grid.dropped_hits}")
+                  f"v={v:.2f} w={w:+.2f} 대상={len(found_targets)} 비전거부={detector.rejected} 지도밖hit={planner.grid.dropped_hits}")
 
 
 if __name__ == "__main__":
