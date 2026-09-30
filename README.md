@@ -130,7 +130,7 @@ controllers/     tb3_gridnav = 전체 스택, tb3_catalog = 비전 카탈로그 
 worlds/          apartment.wbt(대회 원본) · apartment_submit.wbt(심사용: 원본 + controller만 tb3_gridnav)
                  apartment_gridnav.wbt(개발용: + Supervisor 진실값, 지도 Display) · *_catalog/*_vision_*(비전 시험)
 protos/          색 사과 PROTO
-docs/            WORKLOG · AUDIT · BRANCHES · PRESENTATION · DEMO_SCRIPT · TALK_SCRIPT · SPEECH · images/
+docs/            WORKLOG · AUDIT · BRANCHES · PRESENTATION · SPEECH · images/
 prefetch_assets.py   macOS Webots 에셋 캐시 선다운로드
 tests/           B조 2사과 미션 단위 테스트 (python -m unittest tests.test_two_apple_mission)
 ```
@@ -181,8 +181,7 @@ Webots Preferences > General > Python command 에 위 패키지가 설치된 파
 | `docs/AUDIT.md` | 강의 자료 대비 구현·누락·차이 표, 튠 대상 |
 | `docs/BRANCHES.md` | 브랜치 = 파일 소유 규칙, PR 규칙 |
 | `docs/PRESENTATION.md` | 발표용 7항목 (보여줄 것 → 문제 → 원인 → 수정 → 수치) |
-| `docs/DEMO_SCRIPT.md` | 시연 화면 시각별 키워드, 예상 밖 상황 대응, 숫자 카드 |
-| `docs/TALK_SCRIPT.md`, `docs/SPEECH.md` | 발표 대사 |
+| `docs/SPEECH.md` | 발표 대사 (시연 화면을 보며 설명한 5가지) |
 | `docs/images/` | 상태 기계 그림, 확인 프레임, 오탐 사례 |
 
 ---
