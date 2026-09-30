@@ -21,6 +21,7 @@ from robot_config import ROBOT_RADIUS, WHEEL_RADIUS, WHEEL_SEPARATION, MAX_WHEEL
 
 LOOKAHEAD = 0.25            # [m] 길면 커브 안쪽 가로지름, 짧으면 지그재그
 CRUISE_V = 0.15             # [m/s] 순항 속도 (TB3 최대 0.22)
+STATIC_CONFIRM_SCANS = 8    # 약 0.8 s 연속 관측된 점만 정적 장애물로 인정
 STOP_DIST = ROBOT_RADIUS + 0.10   # 정면 이 거리 안에 무언가 있으면 전진 금지
 
 
@@ -68,6 +69,16 @@ class MotionController:
         self.grid = None
         self._last_ranges = None
         self._owns_grid = True
+        self._scan_index = 0
+        self._last_hit_scan = None
+        self._stable_hit_count = None
+
+    def _reset_static_evidence(self):
+        """점유 log-odds 외에 위치가 일정 시간 유지됐는지도 별도로 기록한다."""
+        shape = self.grid.spec.shape
+        self._last_hit_scan = np.full(shape, -1_000_000, dtype=np.int32)
+        self._stable_hit_count = np.zeros(shape, dtype=np.uint16)
+        self._scan_index = 0
 
     def set_obstacle_map(self, grid):
         """통합 시 planner.grid를 공유할 수 있다. 공유 지도는 여기서 갱신하지 않는다.
@@ -78,24 +89,59 @@ class MotionController:
         self.grid = grid
         self._owns_grid = False
         self._last_ranges = None
+        self._reset_static_evidence()
 
     def _obstacles(self, pose, ranges, angles):
         if self.grid is None:
             self.grid = OccupancyGrid(
                 GridSpec.from_size(30.0, 30.0, 0.05, center=pose[:2]),
                 max_range=LIDAR_MAX_RANGE)
-        if self._owns_grid and (self._last_ranges is None or not np.array_equal(ranges, self._last_ranges, equal_nan=True)):
-            self.grid.update(pose, angles, ranges)
-            self._last_ranges = ranges.copy()
+            self._reset_static_evidence()
+        elif self._last_hit_scan is None or self._last_hit_scan.shape != self.grid.spec.shape:
+            self._reset_static_evidence()
+
         finite = np.isfinite(ranges) & (ranges > 0.05) & (ranges < LIDAR_MAX_RANGE)
         points = lidar_to_world(angles[finite], ranges[finite], pose)
         rr, cc = self.grid.spec.world_to_grid(points[:, 0], points[:, 1])
-        static = np.zeros(len(points), dtype=bool)
-        for dr in (-1, 0, 1):
-            for dc in (-1, 0, 1):
-                valid = self.grid.spec.in_bounds(rr + dr, cc + dc)
-                r, c = self.grid.spec.clip(rr + dr, cc + dc)
-                static |= valid & (self.grid.log_odds[r, c] > 1.5)
+
+        # 같은 Webots LiDAR 프레임이 여러 제어 스텝 반복될 수 있어 새 스캔에서만
+        # 점유 지도와 정적 관측 시간을 갱신한다.
+        new_scan = (self._last_ranges is None
+                    or not np.array_equal(ranges, self._last_ranges, equal_nan=True))
+        if new_scan:
+            self._scan_index += 1
+            self._last_ranges = ranges.copy()
+
+            in_bounds = self.grid.spec.in_bounds(rr, cc)
+            flat = np.unique(rr[in_bounds] * self.grid.spec.cols + cc[in_bounds])
+            hit_r, hit_c = np.divmod(flat, self.grid.spec.cols)
+            previous = self._last_hit_scan[hit_r, hit_c]
+            continuing = self._scan_index - previous <= 2
+            count = self._stable_hit_count[hit_r, hit_c]
+            self._stable_hit_count[hit_r, hit_c] = np.where(
+                continuing, np.minimum(count.astype(np.uint32) + 1, 65535), 1
+            ).astype(np.uint16)
+            self._last_hit_scan[hit_r, hit_c] = self._scan_index
+
+        # log-odds만으로 분류하면 천천히 움직이는 사람도 몇 프레임 만에 정적으로
+        # 굳는다. 이 점이 찍힌 같은 셀 자체가 8회 이상 지속 관측돼야 정적으로 본다.
+        # 주변 셀까지 빌려오면 벽 옆을 걷는 사람을 벽으로 오인할 수 있어 쓰지 않는다.
+        in_bounds = self.grid.spec.in_bounds(rr, cc)
+        r, c = self.grid.spec.clip(rr, cc)
+        recent = self._scan_index - self._last_hit_scan[r, c] <= 2
+        persistent = (in_bounds & recent
+                      & (self._stable_hit_count[r, c] >= STATIC_CONFIRM_SCANS))
+        static = persistent & (self.grid.log_odds[r, c] > 1.5)
+
+        if new_scan and self._owns_grid:
+            # Unconfirmed hits are the dynamic/unknown set. Skip those beams entirely
+            # instead of turning them into free rays through the moving obstacle.
+            # Thus a person is still present in `dynamic` for this DWA cycle, while
+            # its transient position does not accumulate in the static log-odds map.
+            map_ranges = ranges.copy()
+            hit_indices = np.flatnonzero(finite)
+            map_ranges[hit_indices[~persistent]] = 0.0
+            self.grid.update(pose, angles, map_ranges)
         return points[static], points[~static]
 
     def command(self, pose, path, ranges, angles, state):
