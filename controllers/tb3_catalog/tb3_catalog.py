@@ -25,7 +25,8 @@ import vision
 from target_detection import TARGET_COLOR, MIN_APPLE_RADIUS_PX
 
 DIST = 1.2                      # 물체까지 거리 [m]
-OUT = os.path.join(_HERE, "catalog")
+MODE = os.environ.get("CATALOG_MODE", "objects")     # objects: 바닥 물체 전수 촬영 / apples: 빨간 사과 거리·각도별 촬영
+OUT = os.path.join(_HERE, "catalog" if MODE == "objects" else "catalog_apples")
 os.makedirs(OUT, exist_ok=True)
 
 sup = Supervisor()
@@ -57,6 +58,50 @@ print(f"[catalog] 촬영 대상 {len(objects)}개")
 
 rows = []
 k = 0
+
+
+def shoot(rx, ry, yaw):
+    """로봇을 (rx, ry) 에 yaw 방향으로 놓고 3스텝 뒤 프레임/탐지/빨강 픽셀 수 반환."""
+    tr_field.setSFVec3f([rx, ry, 0.0]); rot_field.setSFRotation([0, 0, 1, yaw])
+    me.resetPhysics()
+    for _ in range(3):
+        sup.step(ts)
+    bgr = vision.webots_image_to_bgr(camera.getImage(), W, H)
+    det = vision.detect_apple(bgr, TARGET_COLOR, MIN_APPLE_RADIUS_PX)
+    red_px = int((vision.color_mask(bgr, TARGET_COLOR) > 0).sum())
+    return bgr, det, red_px
+
+
+if MODE == "apples":
+    # 빨간 사과 노드의 '실제' 위치 (물리로 굴렀을 수 있으니 getPosition)
+    apples = []
+    for i in range(root.getCount()):
+        n = root.getMFNode(i)
+        try:
+            if n.getTypeName() == "RedApple":
+                px, py, pz = n.getPosition()
+                nm = n.getField("name").getSFString() if n.getField("name") else "RedApple"
+                apples.append((nm, px, py, pz))
+        except Exception:
+            continue
+    print(f"[catalog] apples 모드: 빨간 사과 {len(apples)}개 × 거리 4 × 방향 8")
+    for nm, ax, ay, az in apples:
+        for dist in (0.8, 1.5, 2.5, 3.5):
+            for j in range(8):
+                ang = j * math.pi / 4
+                rx, ry = ax + dist * math.cos(ang), ay + dist * math.sin(ang)
+                yaw = math.atan2(ay - ry, ax - rx)
+                bgr, det, red_px = shoot(rx, ry, yaw)
+                k += 1
+                safe = "".join(ch if ch.isalnum() else "_" for ch in nm)[:30]
+                fn = f"{k:03d}_RedApple_{safe}_d{dist}_a{j * 45:03d}.jpg"
+                vision.save_debug_frame(vision.draw_detection(bgr, det, TARGET_COLOR), os.path.join(OUT, fn))
+                rows.append(dict(file=fn, type="RedApple", name=nm, x=round(ax, 2), y=round(ay, 2), z=round(az, 2),
+                                 view=j, dist=dist, angle=j * 45, red_px=red_px, detected=int(det is not None),
+                                 r=round(det[2], 1) if det else "", is_apple=1))
+                print(f"[catalog] {fn}: 빨강 {red_px}px 탐지={'O' if det else 'x'}")
+    objects = []          # 아래 objects 루프는 건너뜀
+
 for tn, name, x, y, z in objects:
     for j, ang in enumerate((0.0, math.pi / 2, math.pi, -math.pi / 2)):     # 물체 기준 4방향에서 접근
         rx, ry = x + DIST * math.cos(ang), y + DIST * math.sin(ang)
