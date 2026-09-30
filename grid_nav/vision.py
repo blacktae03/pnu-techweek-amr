@@ -47,10 +47,29 @@ def color_mask(bgr, color="red"):
     return mask
 
 
-def detect_apple(bgr, color="red", min_radius_px=3.0, max_radius_px=60.0, min_circularity=0.45):
+def object_extent(mask, cx, cy, r):
+    """탐지된 덩어리가 속한 '전체 빨간 물체' 의 (폭, 높이) [px].
+
+    왜: 소화기처럼 라벨·손잡이로 빨간 부분이 여러 조각으로 갈라진 물체는 조각 하나만 보면 사과처럼 보인다.
+        마스크를 세로로 부풀려(조각 사이 틈 ≈ 반지름 크기) 조각들을 붙인 뒤, 덩어리를 품는 연결 성분의 크기를 잰다.
+        사과: 높이 ≈ 폭.   소화기·병·기둥: 높이 ≫ 폭."""
+    k = max(3, int(r))
+    kernel = np.ones((2 * k + 1, max(3, k // 2 * 2 + 1)), np.uint8)       # 세로로 긴 커널
+    grown = cv2.dilate(mask, kernel)
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(grown, connectivity=8)
+    lab = labels[min(max(int(cy), 0), mask.shape[0] - 1), min(max(int(cx), 0), mask.shape[1] - 1)]
+    if lab == 0:
+        return 2 * r, 2 * r
+    x, y, w, h = stats[lab, cv2.CC_STAT_LEFT], stats[lab, cv2.CC_STAT_TOP], stats[lab, cv2.CC_STAT_WIDTH], stats[lab, cv2.CC_STAT_HEIGHT]
+    # 부풀린 만큼 되돌림
+    return max(1.0, w - (k // 2 * 2)), max(1.0, h - 2 * k)
+
+
+def detect_apple(bgr, color="red", min_radius_px=3.0, max_radius_px=60.0, min_circularity=0.45, max_aspect=1.5):
     """가장 큰 색 덩어리의 (cx, cy, r) [px]. 없거나 조건에 안 맞으면 None.
-    max_radius_px : 사과(지름 5 cm)는 0.3 m 앞에서도 반지름 ≈ 46 px. 그보다 크면 바닥·벽 같은 큰 면 → 무시.
-    min_circularity: contour 면적 / 외접원 면적. 사과는 둥글어 0.6~0.8, 바닥 얼룩·가구 모서리는 낮다."""
+    max_radius_px : 사과는 0.3 m 앞에서도 반지름 ≈ 46 px. 그보다 크면 바닥·벽 같은 큰 면 → 무시.
+    min_circularity: contour 면적 / 외접원 면적. 사과는 둥글어 0.6~0.8, 바닥 얼룩·가구 모서리는 낮다.
+    max_aspect    : 덩어리가 속한 전체 빨간 물체의 높이/폭. 사과 ≈ 1, 소화기·병은 2~4 → 거부 (object_extent 참고)."""
     if cv2 is None:
         return None
     mask = color_mask(bgr, color)
@@ -62,6 +81,9 @@ def detect_apple(bgr, color="red", min_radius_px=3.0, max_radius_px=60.0, min_ci
     if r < min_radius_px or r > max_radius_px:
         return None
     if cv2.contourArea(c) / (np.pi * r * r + 1e-6) < min_circularity:
+        return None
+    w_obj, h_obj = object_extent(mask, cx, cy, r)
+    if h_obj / w_obj > max_aspect:
         return None
     M = cv2.moments(c)
     if M["m00"] > 0:                                       # 무게중심이 외접원 중심보다 안정적

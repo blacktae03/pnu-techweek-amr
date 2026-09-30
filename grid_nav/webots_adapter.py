@@ -88,13 +88,13 @@ def draw_map_on_display(display, W, H, planner, pose, goal, path, targets, state
         return int((x - x0) / spec.resolution * scale), int((y1 - y) / spec.resolution * scale)
 
     if path:
-        cv2.polylines(canvas, [np.array([to_px(x, y) for x, y in path], np.int32)], False, (255, 0, 255), 2)
+        cv2.polylines(canvas, [np.array([to_px(x, y) for x, y in path], np.int32)], False, (200, 0, 200), 2)   # 자주 (RGB)
     for tx, ty in targets:
-        cv2.drawMarker(canvas, to_px(tx, ty), (0, 200, 255), cv2.MARKER_TRIANGLE_UP, 14, 2)
+        cv2.drawMarker(canvas, to_px(tx, ty), (255, 210, 0), cv2.MARKER_TRIANGLE_UP, 14, 2)   # 노랑 = 기록한 사과
     if goal is not None:
-        cv2.drawMarker(canvas, to_px(goal[0], goal[1]), (0, 0, 255), cv2.MARKER_STAR, 16, 2)
+        cv2.drawMarker(canvas, to_px(goal[0], goal[1]), (255, 0, 0), cv2.MARKER_STAR, 16, 2)   # 빨강 = 현재 목표
     px, py = to_px(pose[0], pose[1])
-    cv2.circle(canvas, (px, py), max(3, int(ROBOT_RADIUS / spec.resolution * scale)), (255, 80, 0), -1)
+    cv2.circle(canvas, (px, py), max(3, int(ROBOT_RADIUS / spec.resolution * scale)), (0, 120, 255), -1)   # 파랑 = 로봇
     cv2.line(canvas, (px, py), (int(px + 12 * math.cos(pose[2])), int(py - 12 * math.sin(pose[2]))), (0, 0, 0), 2)
     cv2.putText(canvas, state, (6, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
     im = display.imageNew(canvas.tobytes(), Display.RGB, W, H)
