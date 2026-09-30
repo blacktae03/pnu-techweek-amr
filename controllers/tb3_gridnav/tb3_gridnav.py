@@ -26,7 +26,9 @@ import webots_adapter
 
 try:
     robot = Supervisor()
-    node = robot.getSelf()
+    # 원본 apartment.wbt 는 supervisor FALSE: getSelf() 가 예외 대신 빈 노드를 돌려주고 위치가 NaN 이 된다
+    # (제출 월드 1차 실행: 시작 pose (nan, nan) → 사과 위치 조회 크래시). 권한 플래그로 확인.
+    node = robot.getSelf() if robot.getSupervisor() else None
 except Exception:
     robot, node = Robot(), None
 
