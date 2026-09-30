@@ -10,3 +10,4 @@ worlds/.*.wbproj
 !protos/icons/*.png
 models/
 .DS_Store
+controllers/tb3_catalog/catalog*/*.jpg
