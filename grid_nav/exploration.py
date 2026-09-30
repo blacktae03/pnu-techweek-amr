@@ -41,7 +41,8 @@ W_DETOUR = 0.0              # 경로/직선 비율이 1.5 넘는 frontier 벌점
 # SEARCH (카메라 미확인 구역 수색) — 학습 코드 sim_demo.py 의 SEARCH 단계 이식.
 # 왜: LiDAR(3.5 m, 360°) 로 지도가 다 그려져 frontier 가 사라져도, 카메라(60°, 사과 탐지 유효 ~3 m) 가 훑지 않은 빈칸이
 #     남는다. 빨간 사과 2개를 모두 찾아야 하므로 frontier 소진 = 탐색 끝이 아니다.
-CAM_SEEN_RANGE = 2.5        # [m] 카메라로 '봤다' 고 인정하는 거리 (target_detection.MAX_DETECT_DIST 3.0 보다 보수적)
+CAM_SEEN_RANGE = 2.0        # [m] 카메라로 '봤다' 고 인정하는 거리. 1차 실행: 벽 옆 빨간 사과는 2.0~2.7 m·정면에서도 미탐지(가구에 가림),
+                            # 이전 완주 3회 모두 0.8~0.9 m 에서만 탐지 → 멀리서 '봤다' 고 치면 SEARCH 가 그곳을 건너뛴다
 MIN_UNSEEN_CELLS = 40       # 수색 대상 미확인 덩어리 최소 칸 수 (0.1 m² = 40칸)
 
 
@@ -57,10 +58,15 @@ class GridPlanner:
         self._inflated = None
         self._cost = None
         self.seen = np.zeros(self.spec.shape, dtype=bool)   # 카메라 시야로 본 칸 (SEARCH 용)
+        self._forced = np.zeros(self.spec.shape, dtype=bool) # mark_obstacle 로 강제한 칸. 매 스캔 뒤 다시 벽으로 고정
         self.unseen_cells = 0                                # 마지막 next_search_goal 때 '갈 수 있는데 안 본' 칸 수
 
     def update_map(self, pose, angles, ranges):
         self.grid.update(pose, angles, ranges)
+        if self._forced.any():
+            # LiDAR 가 못 보는 물체(사과 등)는 빔이 그 자리를 '빈칸' 으로 지나가며 log-odds 를 매 스캔 -0.62 씩 깎아
+            # 강제 표시가 1 초 안에 지워졌다 (1차 실행: 보라 사과 등록 0.45 m 뒤 30 s 만에 그 자리로 주행해 접촉).
+            self.grid.log_odds[self._forced] = self.grid.l_clamp
         self._ternary = None                       # 캐시 무효화
 
     def _refresh(self):
@@ -134,6 +140,7 @@ class GridPlanner:
         disk = (rr ** 2 + cc ** 2) <= r_c ** 2
         R = np.clip(r0 + rr, 0, self.spec.rows - 1); C = np.clip(c0 + cc, 0, self.spec.cols - 1)
         self.grid.log_odds[R, C] = np.where(disk, self.grid.l_clamp, self.grid.log_odds[R, C])
+        self._forced[R, C] |= disk                 # 이후 스캔의 miss 로 지워지지 않게 고정 (update_map 에서 재적용)
         self._ternary = None
 
     # ------------------------------------------------------------------
@@ -158,6 +165,15 @@ class GridPlanner:
     def unseen_mask(self):
         self._refresh()
         return (self._ternary == 0) & (self._inflated == 0) & ~self.seen
+
+    def unseen_near(self, pose, radius_m=2.0):
+        """로봇 주변 radius_m 안의 '갈 수 있는데 카메라로 안 본' 칸 수 (제자리 둘러보기 판단용)."""
+        unseen = self.unseen_mask()
+        r, c = self.spec.world_to_grid(pose[0], pose[1]); k = int(radius_m / self.spec.resolution)
+        r0, r1 = max(0, int(r) - k), min(self.spec.rows, int(r) + k + 1); c0, c1 = max(0, int(c) - k), min(self.spec.cols, int(c) + k + 1)
+        sub = unseen[r0:r1, c0:c1]
+        yy, xx = np.ogrid[r0:r1, c0:c1]
+        return int((sub & ((yy - r) ** 2 + (xx - c) ** 2 <= k * k)).sum())
 
     def next_search_goal(self, pose, current_goal=None, keep_radius=GOAL_KEEP_RADIUS) -> Optional[Tuple[float, float]]:
         """'갈 수 있는 빈칸' 중 카메라로 본 적 없는 칸을 덩어리로 묶어 frontier 와 같은 점수(BFS 경로거리) 로 목표 선택.

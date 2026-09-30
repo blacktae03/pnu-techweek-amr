@@ -32,8 +32,9 @@ CONFIRM_FRAMES = 2          # 연속 프레임 수 이상 보여야 확정 (한 
 # (B조 실행: 보라 사과 충돌). 같은 색·원형도 검사로 찾아 지도에 장애물로 등록한다. 빨간 사과 판정 로직은 건드리지 않는다.
 OBSTACLE_COLORS = ("green", "orange", "purple")
 OBSTACLE_EVERY = 2          # 대상 색 처리(VISION_EVERY) 몇 번마다 한 번 장애물 색을 처리 (비용 절감)
-OBSTACLE_MERGE_RADIUS = 0.5 # 이 반경 안의 재탐지는 같은 장애물
-OBSTACLE_MAX_DIST = 2.5     # 이보다 먼 추정은 장애물 등록 안 함 (위치 오차 큼)
+OBSTACLE_MERGE_RADIUS = 0.8 # 이 반경 안의 재탐지는 같은 장애물 (더 가까이서 보면 위치 갱신; 1차 실행 1.7 m 추정이 0.54 m 어긋남)
+OBSTACLE_MAX_DIST = 2.0     # 이보다 먼 추정은 장애물 등록 안 함. 멀수록 반경을 키워(obstacle_radius) 오차를 덮는다
+                            # (1차 실행: 2.2~2.4 m 추정이 진실값과 0.85 m, 1.7 m 는 0.54 m, 1.4 m 는 0.2 m, 0.45 m 는 0.02 m 어긋남)
 
 
 def target_world_from_pixel(pose, cx_px, radius_px, cam_w=CAM_W, fov=CAM_FOV,
@@ -86,6 +87,8 @@ class TargetDetector:
         self.rejected = {"horizon": 0, "inconsistent": 0, "far": 0}
         self.n_snapshots = 0
         self.obstacles: List[Tuple[float, float, str]] = []   # 확정된 비대상 사과 (x, y, color)
+        self._obs_dist: List[float] = []                       # 각 장애물을 가장 가까이서 본 거리
+        self.obstacle_updates: List[Tuple[int, float, float, float]] = []   # (idx, x, y, radius) 어댑터가 지도에 찍을 큐
         self._obs_consec = {c: 0 for c in OBSTACLE_COLORS}
         self._obs_frames = 0
         self.obstacle_ms = None                                # 장애물 색 처리 1회 비용 [ms] (진단)
@@ -142,6 +145,11 @@ class TargetDetector:
             vision.save_debug_frame(vision.draw_detection(bgr, det, self.color),
                                     os.path.join(self.debug_dir, f"det_{self.n_snapshots}.jpg"))
 
+    @staticmethod
+    def obstacle_radius(dist):
+        """지도에 찍을 장애물 반경: 사과 반지름 0.05 + 여유 0.10 + 거리 비례 위치 불확실성(1차 실행 실측 ≈ 0.3·거리)."""
+        return 0.15 + 0.25 * max(0.0, dist - 0.5)
+
     def _detect_obstacle_apples(self, bgr, pose, t):
         """빨강이 아닌 사과(초록·주황·보라) 를 같은 기하 규칙(수평선 아래, 두 거리 추정 일치, 2프레임) 으로 찾아
         self.obstacles 에 기록. 어댑터가 이를 지도 장애물(mark_obstacle)로 찍는다. 대상 색 판정과는 완전히 분리."""
@@ -161,10 +169,17 @@ class TargetDetector:
                     if self._obs_consec[color] >= CONFIRM_FRAMES:
                         dist = math.sqrt(d_r * d_row)
                         x = pose[0] + dist * math.cos(pose[2] + bearing); y = pose[1] + dist * math.sin(pose[2] + bearing)
-                        if all(math.hypot(x - ox, y - oy) >= OBSTACLE_MERGE_RADIUS for ox, oy, _ in self.obstacles) \
-                                and all(math.hypot(x - tx, y - ty) >= OBSTACLE_MERGE_RADIUS for tx, ty in self.targets):
-                            self.obstacles.append((x, y, color))
-                            print(f"[{t:.1f}s] ○ {color} 사과(장애물) 확정: r={r:.1f}px 거리 {dist:.2f} m → 월드 ({x:.2f}, {y:.2f})  (장애물 {len(self.obstacles)}개)")
+                        if all(math.hypot(x - tx, y - ty) >= OBSTACLE_MERGE_RADIUS for tx, ty in self.targets):
+                            idx = next((i for i, (ox, oy, _) in enumerate(self.obstacles)
+                                        if math.hypot(x - ox, y - oy) < OBSTACLE_MERGE_RADIUS), None)
+                            if idx is None:
+                                self.obstacles.append((x, y, color)); self._obs_dist.append(dist); idx = len(self.obstacles) - 1
+                                print(f"[{t:.1f}s] ○ {color} 사과(장애물) 확정: r={r:.1f}px 거리 {dist:.2f} m → 월드 ({x:.2f}, {y:.2f}) "
+                                      f"반경 {self.obstacle_radius(dist):.2f} m  (장애물 {len(self.obstacles)}개)")
+                                self.obstacle_updates.append((idx, x, y, self.obstacle_radius(dist)))
+                            elif dist < self._obs_dist[idx] - 0.3:      # 훨씬 가까이서 다시 봄 → 정확한 위치로 갱신
+                                self.obstacles[idx] = (x, y, color); self._obs_dist[idx] = dist
+                                self.obstacle_updates.append((idx, x, y, self.obstacle_radius(dist)))
             if not ok:
                 self._obs_consec[color] = 0
         self.obstacle_ms = (_time.perf_counter() - t0) * 1000.0

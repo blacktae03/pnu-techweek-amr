@@ -46,6 +46,9 @@ TARGET_COUNT = 2            # 서로 다른 대상의 재확인 + 최종 접근 
 CONFIRM_DIST = 0.70         # 1차 정지·재확인 거리. 카메라(높이 8.8 cm, 수평)에 사과가 화면 안에 들어오는 거리 (0.4 m 이하는 화면 아래로 빠짐)
 ARRIVE_DIST = 0.35          # 최종 "도달" 판정 거리 (로봇 중심~사과). 당일 규칙에 맞출 것
 APPROACH_V = 0.12           # [m/s] 최종 접근 속도 (pure pursuit, DWA 미사용 — 벽 옆 사과는 DWA 여유 거리 안에 있음)
+LOOKAROUND_W = 1.2          # [rad/s] 탐색 목표를 바꿀 때 제자리 한 바퀴 둘러보기 (카메라 60° 는 좁다: 1차 실행에서 빨간 사과 2.5 m 옆을
+LOOKAROUND_MIN_UNSEEN = 120 #   137회 지나치며 한 번도 정면에 두지 않음). 주변 2 m 에 미확인 칸이 이만큼 있을 때만, 25 s 에 1회.
+LOOKAROUND_COOLDOWN_S = 25.0
 HOME_DIST = 0.2             # 복귀 완료 판정
 CONFIRM_HOLD_S = 3.0        # 대상 도착 후 사과를 바라보며 정지·재확인하는 시간 (심사자에게 "도달" 이 보이게)
 CONFIRM_SPIN_S = 4.0        # 정지 중 못 보면 제자리 회전으로 찾는 최대 시간
@@ -242,6 +245,7 @@ def run(robot, start_pose, ground_truth=None, map_save_path="map.npy", map_save_
     visit_fail = 0; return_fail = 0      # VISIT/RETURN 에서 경로 실패 연속 횟수 (무한 회전 방지)
     search_done = 0
     marked_obstacles = 0                 # detector.obstacles 중 지도에 찍은 개수
+    spin_until = -1e9; last_spin = -1e9; prev_goal = None; lookarounds = 0
     v = w = 0.0
     last_scan_t = -np.inf
     progress_since = None; progress_xy = None
@@ -319,9 +323,15 @@ def run(robot, start_pose, ground_truth=None, map_save_path="map.npy", map_save_
             progress_since = None; progress_xy = None
 
         navigating = (goal is not None and state in ("EXPLORE", "SEARCH", "VISIT", "APPROACH", "RETURN")
-                      and math.dist(pose[:2], goal) > ARRIVE_DIST and t >= recover_until)
+                      and math.dist(pose[:2], goal) > ARRIVE_DIST and t >= recover_until and t >= spin_until)
         if watchdog.update(pose, t, navigating):
-            print(f"[{t:.1f}s] !! 국소 정체: 15초 위치 진행 없음 → 안전 후진·재계획")
+            # 1차 실행(21b4945): 전진 명령(v 0.19) 중 15 s 위치 불변 = LiDAR 아래 물체에 걸림. 헛바퀴 감지는 |w|<0.4 조건에
+            # 걸려 못 잡았다. 걸린 자리를 지도에 찍지 않으면 같은 곳으로 다시 간다 → 앞 0.25 m 에 장애물 표시.
+            blocked_ahead = abs(motion.v_cmd) > 0.05
+            print(f"[{t:.1f}s] !! 국소 정체: 15초 위치 진행 없음 → 안전 후진·재계획" + (" (앞 0.25 m 장애물 표시)" if blocked_ahead else ""))
+            if blocked_ahead:
+                ox = pose[0] + OBSTACLE_AHEAD_M * math.cos(pose[2]); oy = pose[1] + OBSTACLE_AHEAD_M * math.sin(pose[2])
+                planner.mark_obstacle(ox, oy, 0.15); motion.remember_obstacle(ox, oy, 0.15)
             if state in ("EXPLORE", "SEARCH"):
                 planner.give_up_goal(goal, t); goal = None
             recover_until = t + RECOVER_BACK_S
@@ -340,9 +350,9 @@ def run(robot, start_pose, ground_truth=None, map_save_path="map.npy", map_save_
         detector.process(camera.getImage(), pose, t)
         found_targets = detector.targets
         # 비대상 사과(초록·주황·보라) → LiDAR 가 못 보는 낮은 장애물로 지도·DWA 에 등록 (보라 사과 충돌 방지)
-        while marked_obstacles < len(detector.obstacles):
-            ox_, oy_, ocol = detector.obstacles[marked_obstacles]; marked_obstacles += 1
-            planner.mark_obstacle(ox_, oy_, 0.15); motion.remember_obstacle(ox_, oy_, 0.15)
+        while detector.obstacle_updates:
+            _, ox_, oy_, orad = detector.obstacle_updates.pop(0); marked_obstacles += 1
+            planner.mark_obstacle(ox_, oy_, orad); motion.remember_obstacle(ox_, oy_, orad)
             if detector.obstacle_ms is not None and marked_obstacles == 1:
                 print(f"[{t:.1f}s] 장애물 색 3종 처리 비용 {detector.obstacle_ms:.1f} ms/프레임")
 
@@ -421,6 +431,12 @@ def run(robot, start_pose, ground_truth=None, map_save_path="map.npy", map_save_
                 if visits.complete and math.hypot(pose[0] - x0, pose[1] - y0) < HOME_DIST:
                     state = "DONE"; goal = None; print(f"[{t:.1f}s] 복귀 완료: 빨간 사과 {len(visits.completed)}개 방문 성공")
             goal = clip_to_map(goal)
+            if (state in ("EXPLORE", "SEARCH") and goal is not None and prev_goal is not None
+                    and math.dist(goal, prev_goal) > 0.5 and t - last_spin > LOOKAROUND_COOLDOWN_S
+                    and t >= recover_until and planner.unseen_near(pose, 2.0) >= LOOKAROUND_MIN_UNSEEN):
+                spin_until = t + 2 * math.pi / LOOKAROUND_W; last_spin = t; lookarounds += 1
+                print(f"[{t:.1f}s] 목표 변경 → 제자리 둘러보기 {2 * math.pi / LOOKAROUND_W:.1f} s (주변 미확인 {planner.unseen_near(pose, 2.0)}칸)")
+            prev_goal = goal
             path = planner.plan(pose, goal) if goal is not None else None
             if goal is not None and path is None:
                 if state == "VISIT" and target_goal is not None:
@@ -466,6 +482,8 @@ def run(robot, start_pose, ground_truth=None, map_save_path="map.npy", map_save_
             front = front[np.isfinite(front) & (front > 0.05)]
             if front.size and float(front.min()) < ROBOT_RADIUS + 0.05:
                 v = 0.0                                                          # 벽 코앞: 회전만
+        if state in ("EXPLORE", "SEARCH") and t < spin_until:
+            v, w = 0.0, LOOKAROUND_W                                              # 둘러보기: 제자리 회전 (카메라로 주변 훑기)
         if state == "CONFIRM":
             if confirm_spin_until > 0 and t < confirm_spin_until:
                 v, w = 0.0, 1.0                                                   # 못 봤으면 제자리 회전
@@ -520,7 +538,7 @@ def run(robot, start_pose, ground_truth=None, map_save_path="map.npy", map_save_
             err = f" 위치오차={math.hypot(pose[0] - gt[0], pose[1] - gt[1]):.2f}m" if gt else ""
             print(f"[{t:6.1f}s] {state:8s} pose=({pose[0]:.2f},{pose[1]:.2f},{math.degrees(pose[2]):.0f}°){err} "
                   f"목표={None if goal is None else (round(goal[0], 2), round(goal[1], 2))} 경로점={0 if not path else len(path)} "
-                  f"v={v:.2f} w={w:+.2f} 대상={len(found_targets)} 방문={len(visits.completed)}/{TARGET_COUNT} 헛바퀴={slip_events} 미확인칸={planner.unseen_cells} DWA복구={motion.recoveries} 비상정지={motion.emergency_stops} 사과장애물={len(detector.obstacles)} 정적/동적점={len(motion._cached_obstacles[0])}/{len(motion._cached_obstacles[1])} 보정={estimator.corrections} 비바닥접촉={contact_events if contact_node else '미계측'} 비전거부={detector.rejected} 지도밖hit={planner.grid.dropped_hits}")
+                  f"v={v:.2f} w={w:+.2f} 대상={len(found_targets)} 방문={len(visits.completed)}/{TARGET_COUNT} 헛바퀴={slip_events} 미확인칸={planner.unseen_cells} 둘러보기={lookarounds} DWA복구={motion.recoveries} 비상정지={motion.emergency_stops} 사과장애물={len(detector.obstacles)} 정적/동적점={len(motion._cached_obstacles[0])}/{len(motion._cached_obstacles[1])} 보정={estimator.corrections} 비바닥접촉={contact_events if contact_node else '미계측'} 비전거부={detector.rejected} 지도밖hit={planner.grid.dropped_hits}")
 
 
 if __name__ == "__main__":
