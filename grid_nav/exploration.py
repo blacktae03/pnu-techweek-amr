@@ -19,7 +19,7 @@ from geometry import GridSpec
 from occupancy_grid import OccupancyGrid, inflate
 from frontier import frontier_mask, cluster_frontiers, select_frontier, bfs_distance_map_coarse
 from astar import plan_path, build_cost_map
-from robot_config import ROBOT_RADIUS, LIDAR_MAX_RANGE
+from robot_config import ROBOT_RADIUS, LIDAR_MAX_RANGE, CAM_FOV
 
 SAFETY_MARGIN = 0.10        # 팽창 여유. 문/가구 사이가 좁으면 0.06 까지 줄여 볼 것
 MAP_HALF_M = 20.0           # 시작점 기준 ±20 m. apartment 서쪽 끝이 시작점(-0.3)에서 -13 m 이고 위치 추정 오차가 수 m 까지
@@ -28,6 +28,8 @@ RESOLUTION = 0.05           # 600x600 격자. A* 가 느리면 0.075 로
 REPLAN_PERIOD_S = 1.0
 MIN_FRONTIER_CELLS = 6
 GOAL_KEEP_RADIUS = 0.5      # 현재 목표 이 반경 안에 frontier 가 남아 있으면 목표 유지 (진동 방지)
+BLACKLIST_TTL_S = 90.0      # 포기한 목표를 이만큼만 피한다. 영구 블랙리스트는 정체가 반복되면 모든 frontier 를 지워
+                            # "탐색 경로 없음"(기준선 c54afcb: 525 s BLOCKED) 으로 끝난다. 시간이 지나면 다시 시도.
 # frontier 점수 가중치 (sim_demo 스윕으로 결정 — docs/WORKLOG.md feat/exploration 절 참고)
 USE_PATH_DIST = True        # 직선거리 대신 BFS 경로거리 (벽 너머 "가짜로 가까운" frontier 방지)
 BFS_COARSE_FACTOR = 4       # 경로거리 BFS 격자 축소 배율 (800x800 → 200x200, 수십 ms)
@@ -36,6 +38,11 @@ W_SIZE = 0.05
 SIZE_CAP = 40
 W_TURN = 0.3
 W_DETOUR = 0.0              # 경로/직선 비율이 1.5 넘는 frontier 벌점 (방 먼저 끝내기)
+# SEARCH (카메라 미확인 구역 수색) — 학습 코드 sim_demo.py 의 SEARCH 단계 이식.
+# 왜: LiDAR(3.5 m, 360°) 로 지도가 다 그려져 frontier 가 사라져도, 카메라(60°, 사과 탐지 유효 ~3 m) 가 훑지 않은 빈칸이
+#     남는다. 빨간 사과 2개를 모두 찾아야 하므로 frontier 소진 = 탐색 끝이 아니다.
+CAM_SEEN_RANGE = 2.5        # [m] 카메라로 '봤다' 고 인정하는 거리 (target_detection.MAX_DETECT_DIST 3.0 보다 보수적)
+MIN_UNSEEN_CELLS = 40       # 수색 대상 미확인 덩어리 최소 칸 수 (0.1 m² = 40칸)
 
 
 class GridPlanner:
@@ -44,9 +51,13 @@ class GridPlanner:
         self.grid = OccupancyGrid(self.spec, max_range=max_range)
         self.inflate_r = ROBOT_RADIUS + SAFETY_MARGIN
         self.blacklist: List[Tuple[float, float]] = []
+        self._blacklist_t: List[float] = []       # 각 항목의 등록 시각 (give_up_goal 의 t). None 이면 만료 없음
+        self.now = 0.0                            # adapter 가 매 스텝 갱신하는 시뮬 시각 (만료 계산용)
         self._ternary = None
         self._inflated = None
         self._cost = None
+        self.seen = np.zeros(self.spec.shape, dtype=bool)   # 카메라 시야로 본 칸 (SEARCH 용)
+        self.unseen_cells = 0                                # 마지막 next_search_goal 때 '갈 수 있는데 안 본' 칸 수
 
     def update_map(self, pose, angles, ranges):
         self.grid.update(pose, angles, ranges)
@@ -70,6 +81,7 @@ class GridPlanner:
         """다음 탐색 목표. current_goal 을 주면 '목표 유지' 규칙: 현재 목표 반경 keep_radius 안에 아직 frontier 가
         남아 있으면 그대로 둔다 (매초 1등이 바뀌면 로봇이 두 목표 사이를 왔다갔다 한다)."""
         self._refresh()
+        self._expire_blacklist(self.now)
         mask = frontier_mask(self._ternary, self._inflated)
         if current_goal is not None:
             r, c = self.spec.world_to_grid(current_goal[0], current_goal[1])
@@ -79,8 +91,13 @@ class GridPlanner:
             still_frontier = mask[r0:r1, c0:c1].any()
             far_enough = np.hypot(current_goal[0] - pose[0], current_goal[1] - pose[1]) > 0.3
             not_blacklisted = all(np.hypot(current_goal[0] - b[0], current_goal[1] - b[1]) > 0.4 for b in self.blacklist)
-            if still_frontier and far_enough and not_blacklisted:
+            # 목표 칸 자체가 벽/팽창 영역이 됐으면 유지하지 않는다 (지도가 갱신되며 frontier 가 벽으로 바뀐 경우.
+            # 기준선 로그: 목표 (-7.47,-1.88) 이 벽 셀인데 반경 0.5 m 안에 frontier 가 남아 계속 유지 → DWA 정체).
+            goal_passable = self._inflated[int(np.clip(r, 0, self.spec.rows - 1)), int(np.clip(c, 0, self.spec.cols - 1))] == 0
+            if still_frontier and far_enough and not_blacklisted and goal_passable:
                 return tuple(current_goal)
+            if not goal_passable:
+                self.give_up_goal(current_goal, self.now)
         frontiers = cluster_frontiers(mask, min_size=MIN_FRONTIER_CELLS)
         dist_map = None
         if USE_PATH_DIST and frontiers:
@@ -95,8 +112,18 @@ class GridPlanner:
         return plan_path(self._inflated, self.spec, (pose[0], pose[1]), goal_xy, cost_map=self._cost,
                          snap_radius_cells=int(0.6 / self.spec.resolution))
 
-    def give_up_goal(self, goal_xy):
-        self.blacklist.append(tuple(goal_xy))
+    def give_up_goal(self, goal_xy, t=None):
+        """목표 포기. t(시뮬 시각) 를 주면 BLACKLIST_TTL_S 뒤 자동 해제된다."""
+        self._expire_blacklist(self.now if t is None else t)
+        self.blacklist.append(tuple(goal_xy)); self._blacklist_t.append(self.now if t is None else t)
+
+    def _expire_blacklist(self, t):
+        keep = [i for i, t0 in enumerate(self._blacklist_t) if t0 is None or t - t0 < BLACKLIST_TTL_S]
+        if len(keep) != len(self.blacklist):
+            self.blacklist = [self.blacklist[i] for i in keep]; self._blacklist_t = [self._blacklist_t[i] for i in keep]
+
+    def clear_blacklist(self):
+        n = len(self.blacklist); self.blacklist = []; self._blacklist_t = []; return n
 
     def mark_obstacle(self, x, y, radius_m=0.15):
         """지도에 벽을 강제로 찍는다. LiDAR 가 못 보는 낮은 물체(공, 사과, 고양이)에 걸렸을 때 그 자리를 막아
@@ -108,3 +135,50 @@ class GridPlanner:
         R = np.clip(r0 + rr, 0, self.spec.rows - 1); C = np.clip(c0 + cc, 0, self.spec.cols - 1)
         self.grid.log_odds[R, C] = np.where(disk, self.grid.l_clamp, self.grid.log_odds[R, C])
         self._ternary = None
+
+    # ------------------------------------------------------------------
+    # SEARCH: 카메라 미확인 구역 수색 (sim_demo.py 이식)
+    # ------------------------------------------------------------------
+    def mark_camera_seen(self, pose, angles, ranges, cam_fov=CAM_FOV, cam_range=CAM_SEEN_RANGE):
+        """카메라 시야각 안의 LiDAR 빔을 따라 cam_range 까지의 칸을 '봤다' 로 표시.
+        왜 LiDAR 빔을 재활용하나: 카메라가 어디까지 보이는지 = 그 방향으로 벽이 어디 있는지 → LiDAR 가 이미 알려준다."""
+        a = np.asarray(angles); rg = np.asarray(ranges, dtype=float)
+        in_fov = np.abs(a) < cam_fov / 2
+        ang = a[in_fov]
+        r = np.minimum(np.nan_to_num(rg[in_fov], nan=0.0, posinf=cam_range, neginf=0.0), cam_range)
+        step = self.spec.resolution * 0.5
+        ts = np.arange(0.0, cam_range + step, step)
+        d = np.minimum(ts[None, :], r[:, None])                       # (N, S) 빔 끝(벽)에서 멈춤
+        xs = pose[0] + d * np.cos(ang + pose[2])[:, None]
+        ys = pose[1] + d * np.sin(ang + pose[2])[:, None]
+        rr, cc = self.spec.world_to_grid(xs, ys)
+        inb = self.spec.in_bounds(rr, cc)
+        self.seen[rr[inb], cc[inb]] = True
+
+    def unseen_mask(self):
+        self._refresh()
+        return (self._ternary == 0) & (self._inflated == 0) & ~self.seen
+
+    def next_search_goal(self, pose, current_goal=None, keep_radius=GOAL_KEEP_RADIUS) -> Optional[Tuple[float, float]]:
+        """'갈 수 있는 빈칸' 중 카메라로 본 적 없는 칸을 덩어리로 묶어 frontier 와 같은 점수(BFS 경로거리) 로 목표 선택.
+        None 이면 수색할 곳 없음. 목표 칸을 이미 봤으면 다른 목표로 바꾼다."""
+        self._expire_blacklist(self.now)
+        unseen = self.unseen_mask()
+        self.unseen_cells = int(unseen.sum())
+        if current_goal is not None:
+            r, c = self.spec.world_to_grid(current_goal[0], current_goal[1])
+            r = int(np.clip(r, 0, self.spec.rows - 1)); c = int(np.clip(c, 0, self.spec.cols - 1))
+            k = int(keep_radius / self.spec.resolution)
+            still_unseen = unseen[max(0, r - k):r + k + 1, max(0, c - k):c + k + 1].any()
+            if still_unseen and not self.seen[r, c] and self._inflated[r, c] == 0 \
+                    and all(np.hypot(current_goal[0] - b[0], current_goal[1] - b[1]) > 0.4 for b in self.blacklist):
+                return tuple(current_goal)
+        clusters = cluster_frontiers(unseen, min_size=MIN_UNSEEN_CELLS)
+        if not clusters:
+            return None
+        r, c = self.spec.world_to_grid(pose[0], pose[1])
+        dist_map = bfs_distance_map_coarse(self._inflated == 0, (int(r), int(c)), BFS_COARSE_FACTOR) if USE_PATH_DIST else None
+        f = select_frontier(clusters, pose, self.spec, blacklist_xy=self.blacklist, dist_map=dist_map,
+                            w_dist=W_DIST, w_size=0.01, size_cap=200, w_turn=W_TURN)
+        return f.goal_xy(self.spec) if f else None
+
