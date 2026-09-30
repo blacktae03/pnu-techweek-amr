@@ -33,6 +33,7 @@ from astar import plan_path
 from target_detection import TargetDetector, target_world_from_pixel
 import vision
 from motion_control import MotionController, lookahead_control, to_wheel_speeds
+from sound_localization import SoundListener, make_song_wav
 
 try:
     from controller import Robot          # Webots 가 제공. Webots 밖에서는 없음
@@ -48,6 +49,9 @@ HOME_DIST = 0.2             # 복귀 완료 판정
 CONFIRM_HOLD_S = 3.0        # 대상 도착 후 사과를 바라보며 정지·재확인하는 시간 (심사자에게 "도달" 이 보이게)
 CONFIRM_SPIN_S = 4.0        # 정지 중 못 보면 제자리 회전으로 찾는 최대 시간
 HOLD_SECONDS = float(os.environ.get("GRIDNAV_HOLD", "0"))   # 테스트용: 처음 N초 정지
+# 스토리 기능 (feat/sound): 로봇이 노래를 재생하고, 사람의 "외침"(Emitter) 을 Receiver 로 듣고 그쪽으로 우선 이동
+SOUND_ARRIVE_DIST = 1.0     # 소리 추정 위치 이 거리 안에 오면 "도착" → 원래 흐름으로
+SOUND_MAX_FAILS = 3         # 소리 위치까지 경로 실패 연속 이 횟수면 포기
 # 헛바퀴(slip) 감지: 전진 명령 중인데 스캔이 1초 전과 거의 같으면 로봇은 안 움직인 것 (낮은 물체에 걸림)
 SLIP_WINDOW_S = 1.0         # 비교할 과거 스캔의 시간 차
 SLIP_SCAN_CHANGE_M = 0.04   # 이보다 스캔 변화가 작으면 '정지' (0.15 m/s × 1 s = 0.15 m 변해야 정상)
@@ -133,9 +137,10 @@ def main():
 
 
 def run(robot, start_pose, ground_truth=None, map_save_path="map.npy", map_save_every_s=2.0,
-        use_scan_matching=False):
+        use_scan_matching=False, story=False):
     """robot: Robot() 또는 Supervisor().  start_pose: 대회 제공 (x, y, theta).
-    ground_truth: 디버깅용 콜백 (진짜 pose). map_save_path: 지도/상태 npz 저장 위치 (view_live.py 용)."""
+    ground_truth: 디버깅용 콜백 (진짜 pose). map_save_path: 지도/상태 npz 저장 위치 (view_live.py 용).
+    story: True 면 Speaker 로 노래 재생 + Receiver("ear") 로 사람의 외침을 듣고 그쪽으로 우선 이동 (apartment_story.wbt)."""
     timestep = int(robot.getBasicTimeStep())
     dt = timestep / 1000.0
 
@@ -154,6 +159,25 @@ def run(robot, start_pose, ground_truth=None, map_save_path="map.npy", map_save_
     except Exception:
         display = None
     debug_dir = os.path.dirname(os.path.abspath(map_save_path)) if map_save_path else None
+    # --- 스토리 장치 (없는 월드면 자동 비활성) ---
+    listener = None
+    if story:
+        try:
+            rx = robot.getDevice("ear")
+            listener = SoundListener(rx, timestep)
+            print("[story] Receiver 'ear' 활성: 사람의 외침을 듣습니다")
+        except Exception as e:
+            print("[story] Receiver 없음 → 소리 기능 비활성:", e)
+        try:
+            from controller import Speaker
+            speaker = robot.getDevice("speaker")
+            song = os.path.join(debug_dir or ".", "song.wav")
+            if not os.path.exists(song):
+                make_song_wav(song)
+            Speaker.playSound(speaker, speaker, song, 0.5, 1.0, 0.0, True)      # 반복 재생
+            print(f"[story] 노래 재생 시작: {song}")
+        except Exception as e:
+            print("[story] Speaker 재생 실패 (무시):", e)
 
     # --- 모듈 (브랜치별) ---
     planner = GridPlanner(start_xy=start_pose[:2], max_range=min(lidar.getMaxRange(), LIDAR_MAX_RANGE))
@@ -163,7 +187,8 @@ def run(robot, start_pose, ground_truth=None, map_save_path="map.npy", map_save_
 
     # --- 미션 상태 ---
     x0, y0 = start_pose[0], start_pose[1]
-    state = "EXPLORE"                   # EXPLORE → VISIT → CONFIRM → APPROACH → RETURN → DONE
+    state = "EXPLORE"                   # EXPLORE → (GO_TO_SOUND) → VISIT → CONFIRM → APPROACH → RETURN → DONE
+    sound_done = False; sound_fail = 0; sound_goal = None
     confirm_until = -1e9; confirm_target = None; confirm_seen = False; confirm_spin_until = -1e9
     path: Optional[List[Tuple[float, float]]] = None
     goal: Optional[Tuple[float, float]] = None
@@ -240,11 +265,26 @@ def run(robot, start_pose, ground_truth=None, map_save_path="map.npy", map_save_
         detector.process(camera.getImage(), pose, t)
         found_targets = detector.targets
 
+        # (3b) 소리 듣기  [feat/sound]: 새 외침이 오면 발신원 위치 추정 갱신
+        if listener is not None:
+            est = listener.update(pose, t)
+            if est is not None and not sound_done and state in ("EXPLORE", "GO_TO_SOUND"):
+                if state == "EXPLORE":
+                    print(f"[{t:.1f}s] ★ 소리 감지 → 방향 {math.degrees(listener.last_bearing):.0f}°, 거리 {listener.last_dist:.2f} m, "
+                          f"추정 ({est[0]:.2f}, {est[1]:.2f}) → 그쪽으로 이동 (GO_TO_SOUND)")
+                    state = "GO_TO_SOUND"; path = None; sound_fail = 0
+                sound_goal = est                       # 들을 때마다 추정 갱신 (가까워지면 정확해짐)
+
         # (4) 미션 상태 기계 + 경로 계획  [integration]  (스캔 3개 쌓인 뒤, 1 s 주기)
         if scan_count >= 3 and t >= recover_until and (path is None or t - last_plan_t > REPLAN_PERIOD_S):
             last_plan_t = t
-            if state == "EXPLORE" and len(found_targets) >= TARGET_COUNT:
+            if state in ("EXPLORE", "GO_TO_SOUND") and len(found_targets) >= TARGET_COUNT:
                 state = "VISIT"; print(f"[{t:.1f}s] 대상 {len(found_targets)}개 확보 → 탐색 중단, VISIT")
+            if state == "GO_TO_SOUND":
+                goal = sound_goal
+                if goal is not None and math.hypot(goal[0] - pose[0], goal[1] - pose[1]) < SOUND_ARRIVE_DIST:
+                    print(f"[{t:.1f}s] 소리 난 곳 도착 ({goal[0]:.2f}, {goal[1]:.2f}) → 주변 탐색(EXPLORE) 계속")
+                    sound_done = True; state = "EXPLORE"; goal = None; path = None
             if state == "EXPLORE":
                 goal = planner.next_exploration_goal(pose, current_goal=goal)
                 if goal is None:
@@ -299,6 +339,11 @@ def run(robot, start_pose, ground_truth=None, map_save_path="map.npy", map_save_
                     if visit_fail >= 3:                      # 3번 연속 경로 실패 → 그 대상 포기 (무한 회전 방지)
                         visited.append(target_goal); visit_fail = 0
                         print(f"[{t:.1f}s] 대상 ({target_goal[0]:.2f}, {target_goal[1]:.2f}) 까지 경로 3회 실패 → 포기")
+                elif state == "GO_TO_SOUND":
+                    sound_fail += 1
+                    if sound_fail >= SOUND_MAX_FAILS:
+                        print(f"[{t:.1f}s] 소리 위치까지 경로 {SOUND_MAX_FAILS}회 실패 → 포기, EXPLORE")
+                        sound_done = True; state = "EXPLORE"; goal = None
                 elif state == "RETURN":
                     return_fail += 1
                     if return_fail >= 5:                     # 5번 연속 실패 → 미탐색 칸도 지나가도록 재시도
@@ -311,6 +356,7 @@ def run(robot, start_pose, ground_truth=None, map_save_path="map.npy", map_save_
             else:
                 if state == "VISIT": visit_fail = 0
                 if state == "RETURN": return_fail = 0
+                if state == "GO_TO_SOUND": sound_fail = 0
             if planner.grid.dropped_hits > 100 and t - last_map_warn >= 10.0:
                 last_map_warn = t
                 print(f"[{t:.1f}s] !! 지도 밖 측정값 {planner.grid.dropped_hits}개 → exploration.MAP_HALF_M 확인")
@@ -357,7 +403,8 @@ def run(robot, start_pose, ground_truth=None, map_save_path="map.npy", map_save_
             err = f" 위치오차={math.hypot(pose[0] - gt[0], pose[1] - gt[1]):.2f}m" if gt else ""
             print(f"[{t:6.1f}s] {state:8s} pose=({pose[0]:.2f},{pose[1]:.2f},{math.degrees(pose[2]):.0f}°){err} "
                   f"목표={None if goal is None else (round(goal[0], 2), round(goal[1], 2))} 경로점={0 if not path else len(path)} "
-                  f"v={v:.2f} w={w:+.2f} 대상={len(found_targets)} 헛바퀴={slip_events} 보정={estimator.corrections} 비전거부={detector.rejected} 지도밖hit={planner.grid.dropped_hits}")
+                  f"v={v:.2f} w={w:+.2f} 대상={len(found_targets)} 헛바퀴={slip_events} 보정={estimator.corrections}"
+                  f"{' 소리=' + str(listener.count) if listener is not None else ''} 비전거부={detector.rejected} 지도밖hit={planner.grid.dropped_hits}")
 
 
 if __name__ == "__main__":

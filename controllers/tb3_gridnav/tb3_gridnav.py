@@ -67,4 +67,5 @@ else:
 webots_adapter.run(robot, start_pose,
                    ground_truth=ground_truth if node is not None else None,
                    map_save_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), "map.npy"),
-                   use_scan_matching=True)      # LiDAR scan matching 으로 odometry 드리프트·헛바퀴 보정 (localization.CorrelativeMatcher)
+                   use_scan_matching=True,      # LiDAR scan matching 으로 odometry 드리프트·헛바퀴 보정 (localization.CorrelativeMatcher)
+                   story=os.environ.get("GRIDNAV_STORY", "0") == "1")   # 스토리 기능: 노래 재생 + 외침 듣고 이동 (apartment_story.wbt)
