@@ -31,6 +31,7 @@ from pose_estimation import PoseEstimator, WheelOdometry, CompassHeading        
 from exploration import GridPlanner, REPLAN_PERIOD_S
 from astar import plan_path
 from target_detection import TargetDetector, target_world_from_pixel
+import vision
 from motion_control import MotionController, lookahead_control, to_wheel_speeds
 
 try:
@@ -43,6 +44,8 @@ except ImportError:
 TARGET_COUNT = 1            # 이 개수를 찾으면 탐색을 멈추고 방문 → 복귀. 당일 규칙에 맞출 것
 ARRIVE_DIST = ROBOT_RADIUS + 0.3   # 대상 "도착" 판정 거리 (당일 규칙 확인)
 HOME_DIST = 0.2             # 복귀 완료 판정
+CONFIRM_HOLD_S = 3.0        # 대상 도착 후 사과를 바라보며 정지·재확인하는 시간 (심사자에게 "도달" 이 보이게)
+CONFIRM_SPIN_S = 4.0        # 정지 중 못 보면 제자리 회전으로 찾는 최대 시간
 HOLD_SECONDS = float(os.environ.get("GRIDNAV_HOLD", "0"))   # 테스트용: 처음 N초 정지
 # 헛바퀴(slip) 감지: 전진 명령 중인데 스캔이 1초 전과 거의 같으면 로봇은 안 움직인 것 (낮은 물체에 걸림)
 SLIP_WINDOW_S = 1.0         # 비교할 과거 스캔의 시간 차
@@ -159,7 +162,8 @@ def run(robot, start_pose, ground_truth=None, map_save_path="map.npy", map_save_
 
     # --- 미션 상태 ---
     x0, y0 = start_pose[0], start_pose[1]
-    state = "EXPLORE"                   # EXPLORE → VISIT → RETURN → DONE
+    state = "EXPLORE"                   # EXPLORE → VISIT → CONFIRM → RETURN → DONE
+    confirm_until = -1e9; confirm_target = None; confirm_seen = False; confirm_spin_until = -1e9
     path: Optional[List[Tuple[float, float]]] = None
     goal: Optional[Tuple[float, float]] = None
     visited: List[Tuple[float, float]] = []
@@ -255,10 +259,25 @@ def run(robot, start_pose, ground_truth=None, map_save_path="map.npy", map_save_
                     target_goal = min(remaining, key=lambda tg: math.hypot(tg[0] - pose[0], tg[1] - pose[1]))
                     goal = target_goal
                     if math.hypot(goal[0] - pose[0], goal[1] - pose[1]) < ARRIVE_DIST:
-                        visited.append(goal); print(f"[{t:.1f}s] 대상 도착 ({goal[0]:.2f}, {goal[1]:.2f})"); goal = None; target_goal = None
-                        visit_fail = 0
+                        visited.append(goal); print(f"[{t:.1f}s] 대상 도착 ({goal[0]:.2f}, {goal[1]:.2f}) → 확인 단계(CONFIRM)")
+                        state = "CONFIRM"; confirm_target = goal; confirm_until = t + CONFIRM_HOLD_S
+                        confirm_spin_until = -1e9; confirm_seen = False
+                        goal = None; target_goal = None; visit_fail = 0
                 else:
                     state = "RETURN"
+            if state == "CONFIRM":
+                # 도착 후: 사과를 바라보고 정지 → 카메라로 재확인 → (못 보면 제자리 회전) → 복귀
+                if confirm_spin_until < 0 and t >= confirm_until:
+                    if confirm_seen:
+                        print(f"[{t:.1f}s] ✓ 구조 대상 확인 완료 ({confirm_target[0]:.2f}, {confirm_target[1]:.2f}) → 복귀")
+                        state = "RETURN"
+                    else:
+                        print(f"[{t:.1f}s] 정지 중 대상 미확인 → 제자리 회전으로 재탐색 {CONFIRM_SPIN_S:.0f} s")
+                        confirm_spin_until = t + CONFIRM_SPIN_S
+                elif confirm_spin_until > 0 and (t >= confirm_spin_until or confirm_seen):
+                    print(f"[{t:.1f}s] {'✓ 구조 대상 확인 완료' if confirm_seen else '대상 재확인 실패 (기록 좌표 유지)'} → 복귀")
+                    state = "RETURN"
+                goal = None
             if state == "RETURN":
                 goal = (x0, y0)
                 if math.hypot(pose[0] - x0, pose[1] - y0) < HOME_DIST:
@@ -289,6 +308,18 @@ def run(robot, start_pose, ground_truth=None, map_save_path="map.npy", map_save_
 
         # (5) 속도 명령  [feat/dwa]   (환경변수 GRIDNAV_HOLD=초 를 주면 그동안 정지: 비전 테스트용)
         v, w = motion.command(pose, path, ranges, angles, state)
+        if state == "CONFIRM":
+            if confirm_spin_until > 0 and t < confirm_spin_until:
+                v, w = 0.0, 1.0                                                   # 못 봤으면 제자리 회전
+            else:                                                                 # 사과 방향으로 몸 돌린 뒤 정지
+                err = wrap_angle(math.atan2(confirm_target[1] - pose[1], confirm_target[0] - pose[0]) - pose[2])
+                v, w = (0.0, float(np.clip(2.0 * err, -1.2, 1.2))) if abs(err) > math.radians(5) else (0.0, 0.0)
+            if detector.last_det is not None and not confirm_seen:               # 가까이서 다시 보임
+                confirm_seen = True
+                bgr = vision.webots_image_to_bgr(camera.getImage(), detector.cam_w, detector.cam_h)
+                vision.save_debug_frame(vision.draw_detection(bgr, detector.last_det, "confirmed"),
+                                        os.path.join(debug_dir or ".", "confirmed.jpg"))
+                print(f"[{t:.1f}s] 카메라로 대상 재확인 (r={detector.last_det[2]:.0f}px) → confirmed.jpg 저장")
         if t < recover_until:                        # 복구 중: 후진
             v, w = -0.10, 0.0
             motion.v_cmd, motion.w_cmd = v, w
