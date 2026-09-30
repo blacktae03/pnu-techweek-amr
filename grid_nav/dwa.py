@@ -66,14 +66,18 @@ class DWAParams:
     w_reverse: float = 0.5       # 후진 후보에 추가 벌점 (필요할 때만 후진)
     wheel_v_max: float = np.inf  # 바퀴 선속도 한계 [m/s]. 유한하면 실행 가능한 후보만 평가
     wheel_separation: float = 0.160
+    control_dt: float | None = None  # 실제 명령 주기. None이면 기존 dt 사용; dt는 궤적 적분 간격
 
 
 def dynamic_window(v_cur, w_cur, p: DWAParams):
     """지금 속도에서 dt 안에 도달 가능한 (v, ω) 후보 격자."""
-    v_lo = max(p.v_min, v_cur - p.a_v * p.dt)
-    v_hi = min(p.v_max, v_cur + p.a_v * p.dt)
-    w_lo = max(-p.w_max, w_cur - p.a_w * p.dt)
-    w_hi = min(p.w_max, w_cur + p.a_w * p.dt)
+    control_dt = p.dt if p.control_dt is None else p.control_dt
+    if not np.isfinite(control_dt) or control_dt <= 0:
+        raise ValueError("control_dt must be positive and finite")
+    v_lo = max(p.v_min, v_cur - p.a_v * control_dt)
+    v_hi = min(p.v_max, v_cur + p.a_v * control_dt)
+    w_lo = max(-p.w_max, w_cur - p.a_w * control_dt)
+    w_hi = min(p.w_max, w_cur + p.a_w * control_dt)
     vs = np.linspace(v_lo, v_hi, p.n_v)
     ws = np.linspace(w_lo, w_hi, p.n_w)
     # 균등 격자가 0을 놓쳐도 정지/직진을 선택할 수 있게 한다 (후보 수 유지).
