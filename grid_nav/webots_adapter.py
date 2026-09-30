@@ -42,7 +42,8 @@ except ImportError:
     _IN_WEBOTS = False
 
 TARGET_COUNT = 1            # 이 개수를 찾으면 탐색을 멈추고 방문 → 복귀. 당일 규칙에 맞출 것
-ARRIVE_DIST = ROBOT_RADIUS + 0.3   # 대상 "도착" 판정 거리 (당일 규칙 확인)
+CONFIRM_DIST = 0.70         # 1차 정지·재확인 거리. 카메라(높이 8.8 cm, 수평)에 사과가 화면 안에 들어오는 거리 (0.4 m 이하는 화면 아래로 빠짐)
+ARRIVE_DIST = 0.35          # 최종 "도달" 판정 거리 (로봇 중심~사과). 당일 규칙에 맞출 것
 HOME_DIST = 0.2             # 복귀 완료 판정
 CONFIRM_HOLD_S = 3.0        # 대상 도착 후 사과를 바라보며 정지·재확인하는 시간 (심사자에게 "도달" 이 보이게)
 CONFIRM_SPIN_S = 4.0        # 정지 중 못 보면 제자리 회전으로 찾는 최대 시간
@@ -162,7 +163,7 @@ def run(robot, start_pose, ground_truth=None, map_save_path="map.npy", map_save_
 
     # --- 미션 상태 ---
     x0, y0 = start_pose[0], start_pose[1]
-    state = "EXPLORE"                   # EXPLORE → VISIT → CONFIRM → RETURN → DONE
+    state = "EXPLORE"                   # EXPLORE → VISIT → CONFIRM → APPROACH → RETURN → DONE
     confirm_until = -1e9; confirm_target = None; confirm_seen = False; confirm_spin_until = -1e9
     path: Optional[List[Tuple[float, float]]] = None
     goal: Optional[Tuple[float, float]] = None
@@ -258,8 +259,8 @@ def run(robot, start_pose, ground_truth=None, map_save_path="map.npy", map_save_
                 if remaining:
                     target_goal = min(remaining, key=lambda tg: math.hypot(tg[0] - pose[0], tg[1] - pose[1]))
                     goal = target_goal
-                    if math.hypot(goal[0] - pose[0], goal[1] - pose[1]) < ARRIVE_DIST:
-                        visited.append(goal); print(f"[{t:.1f}s] 대상 도착 ({goal[0]:.2f}, {goal[1]:.2f}) → 확인 단계(CONFIRM)")
+                    if math.hypot(goal[0] - pose[0], goal[1] - pose[1]) < CONFIRM_DIST:
+                        visited.append(goal); print(f"[{t:.1f}s] 대상 {CONFIRM_DIST} m 안 도착 ({goal[0]:.2f}, {goal[1]:.2f}) → 확인 단계(CONFIRM)")
                         state = "CONFIRM"; confirm_target = goal; confirm_until = t + CONFIRM_HOLD_S
                         confirm_spin_until = -1e9; confirm_seen = False
                         goal = None; target_goal = None; visit_fail = 0
@@ -269,15 +270,23 @@ def run(robot, start_pose, ground_truth=None, map_save_path="map.npy", map_save_
                 # 도착 후: 사과를 바라보고 정지 → 카메라로 재확인 → (못 보면 제자리 회전) → 복귀
                 if confirm_spin_until < 0 and t >= confirm_until:
                     if confirm_seen:
-                        print(f"[{t:.1f}s] ✓ 구조 대상 확인 완료 ({confirm_target[0]:.2f}, {confirm_target[1]:.2f}) → 복귀")
-                        state = "RETURN"
+                        print(f"[{t:.1f}s] ✓ 구조 대상 확인 완료 ({confirm_target[0]:.2f}, {confirm_target[1]:.2f}) → 최종 접근")
+                        state = "APPROACH"
                     else:
                         print(f"[{t:.1f}s] 정지 중 대상 미확인 → 제자리 회전으로 재탐색 {CONFIRM_SPIN_S:.0f} s")
                         confirm_spin_until = t + CONFIRM_SPIN_S
                 elif confirm_spin_until > 0 and (t >= confirm_spin_until or confirm_seen):
-                    print(f"[{t:.1f}s] {'✓ 구조 대상 확인 완료' if confirm_seen else '대상 재확인 실패 (기록 좌표 유지)'} → 복귀")
-                    state = "RETURN"
+                    print(f"[{t:.1f}s] {'✓ 구조 대상 확인 완료 → 최종 접근' if confirm_seen else '대상 재확인 실패 (기록 좌표로 최종 접근)'}")
+                    state = "APPROACH"
                 goal = None
+            if state == "APPROACH":
+                # 재확인 때 더 가까이서 본 관측으로 detector 가 좌표를 갱신했을 수 있으니 최신 좌표 사용
+                near = min(found_targets, key=lambda tg: math.hypot(tg[0] - confirm_target[0], tg[1] - confirm_target[1]))
+                confirm_target = near
+                goal = near
+                if math.hypot(goal[0] - pose[0], goal[1] - pose[1]) < ARRIVE_DIST:
+                    print(f"[{t:.1f}s] ★ 최종 도달 ({goal[0]:.2f}, {goal[1]:.2f}) 거리 {math.hypot(goal[0] - pose[0], goal[1] - pose[1]):.2f} m → 복귀")
+                    state = "RETURN"; goal = None
             if state == "RETURN":
                 goal = (x0, y0)
                 if math.hypot(pose[0] - x0, pose[1] - y0) < HOME_DIST:
