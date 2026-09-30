@@ -46,7 +46,8 @@ HOLD_SECONDS = float(os.environ.get("GRIDNAV_HOLD", "0"))   # 테스트용: 처�
 # 헛바퀴(slip) 감지: 전진 명령 중인데 스캔이 1초 전과 거의 같으면 로봇은 안 움직인 것 (낮은 물체에 걸림)
 SLIP_WINDOW_S = 1.0         # 비교할 과거 스캔의 시간 차
 SLIP_SCAN_CHANGE_M = 0.04   # 이보다 스캔 변화가 작으면 '정지' (0.15 m/s × 1 s = 0.15 m 변해야 정상)
-SLIP_CONFIRM_S = 1.0        # 이 시간 연속 정지 판정이면 걸린 것으로 확정
+SLIP_CONFIRM_S = 2.0        # 이 시간 연속 정지 판정이면 걸린 것으로 확정
+SLIP_SECTOR_DEG = 40        # 앞뒤 ±이 각도의 빔만 비교. 복도에서 옆 벽 빔은 직진해도 안 변하므로 제외 (4차 실행 오판 원인)
 RECOVER_BACK_S = 3.0        # 복구: 후진 시간 (0.1 m/s → 0.3 m)
 OBSTACLE_AHEAD_M = 0.25     # 복구 시 로봇 앞 이 거리에 장애물을 찍음
 
@@ -186,20 +187,21 @@ def run(robot, start_pose, ground_truth=None, map_save_path="map.npy", map_save_
         moving_cmd = abs(motion.v_cmd) > 0.05 and abs(motion.w_cmd) < 0.4
         if moving_cmd and len(scan_hist) >= 2 and t - scan_hist[0][0] >= SLIP_WINDOW_S * 0.8 and t >= recover_until:
             old = scan_hist[0][1]
-            both = np.isfinite(ranges) & np.isfinite(old)
-            change = float(np.median(np.abs(ranges[both] - old[both]))) if both.sum() > 30 else np.inf
+            sec = np.deg2rad(SLIP_SECTOR_DEG)
+            fb = (np.abs(wrap_angle(angles)) < sec) | (np.abs(wrap_angle(angles - np.pi)) < sec)   # 앞뒤 빔만
+            both = fb & np.isfinite(ranges) & np.isfinite(old)
+            change = float(np.mean(np.abs(ranges[both] - old[both]))) if both.sum() > 15 else np.inf
             if change < SLIP_SCAN_CHANGE_M:
                 if slip_pose_ref is None:
                     slip_pose_ref = pose
                 slip_time += dt
-                if slip_time > 0.3:                      # 헛바퀴로 보이는 동안 pose 를 고정 (가짜 전진 취소)
-                    estimator.odom.set_pose(slip_pose_ref); pose = slip_pose_ref
             else:
                 slip_time = 0.0; slip_pose_ref = None
         else:
             slip_time = 0.0; slip_pose_ref = None
         if slip_time > SLIP_CONFIRM_S:
             slip_events += 1
+            estimator.odom.set_pose(slip_pose_ref); pose = slip_pose_ref      # 확정된 뒤에만 가짜 전진 취소
             ox = pose[0] + OBSTACLE_AHEAD_M * math.cos(pose[2]); oy = pose[1] + OBSTACLE_AHEAD_M * math.sin(pose[2])
             planner.mark_obstacle(ox, oy, 0.15)
             key = None if goal is None else (round(goal[0], 1), round(goal[1], 1))
