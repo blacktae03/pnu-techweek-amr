@@ -23,7 +23,12 @@ LOOKAHEAD = 0.25            # [m] 길면 커브 안쪽 가로지름, 짧으면 �
 CRUISE_V = 0.15             # [m/s] 순항 속도 (TB3 최대 0.22)
 STATIC_CONFIRM_SCANS = 8
 STATIC_CONFIRM_SECONDS = 0.8  # 스캔 빈도가 높아져도 정적 판정 시간을 단축하지 않는다
+STATIC_GAP_PERIODS = 5.0      # 같은 셀 재관측 사이 허용 간격(스캔 주기 배수). LDS-01 잡음 σ≈1.5 cm 로 점이 5 cm 셀
+                              # 경계를 오가면 한 셀은 2~4 스캔마다 찍힌다 → 2.5 로는 이력이 계속 리셋돼 벽이 영원히 '동적'.
+STATIC_NEIGHBOR = 1           # 정적 판정 때 이 반경(셀)의 이웃 이력까지 본다 (3x3). 이력 전파는 하지 않으므로 걷는 사람은
+                              # 셀마다 1~2회 관측에 그쳐 정적으로 굳지 않는다.
 STOP_DIST = ROBOT_RADIUS + 0.10   # 정면 이 거리 안에 무언가 있으면 전진 금지
+RECOVER_V = 0.08                  # [m/s] DWA 복구모드에서 정면이 비었을 때 경로 추종 전진 속도
 
 
 def lookahead_control(pose, path, lookahead=LOOKAHEAD, v=CRUISE_V, w_max=1.5):
@@ -61,7 +66,8 @@ class MotionController:
     def __init__(self):
         self.v_cmd = self.w_cmd = 0.0          # DWA 의 dynamic window 기준이 될 직전 명령
         self.emergency_stops = 0
-        self.params = DWAParams(v_max=0.22, dyn_margin=0.35, clearance_max=0.5,
+        self.recoveries = 0                    # DWA 복구모드(전 후보 탈락) 진입 횟수 (진단)
+        self.params = DWAParams(v_max=0.22, dyn_margin=0.20, clearance_max=0.5,
                                 w_dist=2.0,
                                 control_dt=0.064,  # apartment 월드 기본 64 ms. set_timing으로 설정 가능
                                 wheel_v_max=WHEEL_RADIUS * MAX_WHEEL_SPEED * (1.0 - 1e-12),
@@ -214,7 +220,7 @@ class MotionController:
             flat = np.unique(rr[in_bounds] * self.grid.spec.cols + cc[in_bounds])
             hit_r, hit_c = np.divmod(flat, self.grid.spec.cols)
             previous = self._last_hit_time[hit_r, hit_c]
-            continuing = scan_time - previous <= 2.5 * self.scan_period
+            continuing = scan_time - previous <= STATIC_GAP_PERIODS * self.scan_period
             self._first_hit_time[hit_r, hit_c] = np.where(
                 continuing, self._first_hit_time[hit_r, hit_c], scan_time)
             count = self._stable_hit_count[hit_r, hit_c]
@@ -229,10 +235,19 @@ class MotionController:
         # 주변 셀까지 빌려오면 벽 옆을 걷는 사람을 벽으로 오인할 수 있어 쓰지 않는다.
         in_bounds = self.grid.spec.in_bounds(rr, cc)
         r, c = self.grid.spec.clip(rr, cc)
-        recent = scan_time - self._last_hit_time[r, c] <= 2.5 * self.scan_period
-        persistent = (in_bounds & recent
-                      & (scan_time - self._first_hit_time[r, c] >= STATIC_CONFIRM_SECONDS - 1e-9)
-                      & (self._stable_hit_count[r, c] >= STATIC_CONFIRM_SCANS))
+        # 판정은 3x3 이웃 중 '최근 관측된' 셀의 최장 이력으로 한다 (fix/integration).
+        # 왜: 잡음으로 점이 인접 셀을 오가면 셀 하나의 이력만으로는 벽의 26~37 % 가 정적 확정을 영원히 못 받았고,
+        #     그 점들이 dyn_margin(0.455 m) 을 요구해 실내 통로에서 궤적 87~96 % 가 탈락 → 후진/회전만 반복했다.
+        offs = np.arange(-STATIC_NEIGHBOR, STATIC_NEIGHBOR + 1)
+        nr = np.clip(r[None, :] + np.repeat(offs, len(offs))[:, None], 0, self.grid.spec.rows - 1)
+        nc = np.clip(c[None, :] + np.tile(offs, len(offs))[:, None], 0, self.grid.spec.cols - 1)
+        nb_recent = scan_time - self._last_hit_time[nr, nc] <= STATIC_GAP_PERIODS * self.scan_period
+        nb_count = np.where(nb_recent, self._stable_hit_count[nr, nc], 0).max(axis=0)
+        nb_first = np.where(nb_recent, self._first_hit_time[nr, nc], np.inf).min(axis=0)
+        persistent = (in_bounds & nb_recent.any(axis=0)
+                      & (scan_time - nb_first >= STATIC_CONFIRM_SECONDS - 1e-9)
+                      & (nb_count >= STATIC_CONFIRM_SCANS))
+        nb_logodds = self.grid.log_odds[nr, nc].max(axis=0)
 
         if new_scan and self._owns_grid:
             # Unconfirmed hits are the dynamic/unknown set. Skip those beams entirely
@@ -244,7 +259,7 @@ class MotionController:
             hit_indices = np.flatnonzero(finite)
             map_ranges[hit_indices[~persistent]] = 0.0
             self.grid.update(pose, angles, map_ranges)
-        static = persistent & (self.grid.log_odds[r, c] > 1.5)
+        static = persistent & (nb_logodds > 1.5)
         self._cached_obstacles = (points[static], points[~static])
         return self._cached_obstacles
 
@@ -302,8 +317,16 @@ class MotionController:
                             break
                     if visible_goal is not None:
                         goal = visible_goal
-            v, w = dwa_control(pose, self.v_cmd, self.w_cmd, goal, obstacles,
-                               self.params, dynamic_xy=dynamic)
+            (v, w), dbg = dwa_control(pose, self.v_cmd, self.w_cmd, goal, obstacles,
+                                      self.params, dynamic_xy=dynamic, return_debug=True)
+            if dbg["best"] is None:
+                # 모든 후보가 여유 기준 위반(복구 모드). 정면이 실제로 비어 있으면 후진/회전 대신
+                # 경로를 따라 느리게 전진한다 (fix/integration). 벽 옆 사과·좁은 통로에서 제자리 진동 방지.
+                self.recoveries += 1
+                front = ranges[np.abs(angles) <= math.radians(30)]
+                front = front[np.isfinite(front) & (front > 0.05)]
+                if front.size == 0 or float(front.min()) > STOP_DIST:
+                    v, w = lookahead_control(pose, path, v=RECOVER_V)
         # adapter의 모터 포화와 같은 속도를 다음 dynamic window의 기준으로 삼는다.
         wl, wr = to_wheel_speeds(v, w)
         v = WHEEL_RADIUS * (wl + wr) / 2.0
