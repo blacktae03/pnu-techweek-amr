@@ -18,13 +18,16 @@ import os
 from typing import List, Optional, Tuple
 
 import vision
-from robot_config import CAM_W, CAM_FOV, APPLE_DIAMETER
+from robot_config import CAM_W, CAM_H, CAM_FOV, CAM_HEIGHT, APPLE_DIAMETER, APPLE_CENTER_Z
 
 TARGET_COLOR = "red"        # 찾을 사과 색 (vision.COLOR_RANGES 키). 당일 규칙 확인
 VISION_EVERY = 3            # 몇 스텝마다 카메라 처리 (640x480 색 분할 ≈ 5 ms)
 MIN_APPLE_RADIUS_PX = 3.0   # 이보다 작은 덩어리는 무시 (사과 5 cm → 2.5 m 에서 약 5.5 px)
 MAX_DETECT_DIST = 3.0       # 추정 거리가 이보다 멀면 무시 (거리 추정이 부정확해짐)
-MERGE_RADIUS = 0.6          # 이 반경 안의 재탐지는 같은 대상으로 봄
+MERGE_RADIUS = 1.0          # 이 반경 안의 재탐지는 같은 대상으로 보고 위치를 갱신 (거리 오차가 크므로 넉넉히)
+HORIZON_MARGIN_PX = 6       # 사과 중심은 화면 수평선(H/2) 보다 이만큼 아래여야 함 (바닥 물체 조건)
+CONSISTENCY_RATIO = 2.0     # 반지름 거리 / 세로위치 거리 비율이 [1/R, R] 안이어야 채택
+CONFIRM_FRAMES = 2          # 연속 프레임 수 이상 보여야 확정 (한 프레임 노이즈 배제)
 
 
 def target_world_from_pixel(pose, cx_px, radius_px, cam_w=CAM_W, fov=CAM_FOV,
@@ -45,15 +48,37 @@ def target_world_from_pixel(pose, cx_px, radius_px, cam_w=CAM_W, fov=CAM_FOV,
     return (x, y), bearing, dist
 
 
+def distance_from_row(cy_px, cam_h=CAM_H, cam_w=CAM_W, fov=CAM_FOV, cam_height=CAM_HEIGHT, object_z=APPLE_CENTER_Z):
+    """화면 세로 위치로 잰 거리 (두 번째 독립 추정).
+    카메라가 수평이면 바닥 물체(높이 object_z) 의 중심은 수평선(H/2) 아래  f * (cam_height - object_z) / d  픽셀에 맺힌다.
+    → d = f * (cam_height - object_z) / (cy - H/2).  수평선 위(cy <= H/2)면 바닥 물체가 아니다 → inf."""
+    f = (cam_w / 2.0) / math.tan(fov / 2.0)
+    dy = cy_px - cam_h / 2.0
+    if dy <= 0:
+        return float("inf")
+    return f * (cam_height - object_z) / dy
+
+
 class TargetDetector:
+    """탐지 채택 규칙 (모두 만족해야 대상으로 기록):
+      ① 색·크기·원형도 (vision.detect_apple)
+      ② 화면 수평선 아래 (바닥에 있는 물체)                          → 탁자 위 캔, 표지판 배제
+      ③ 반지름 기반 거리 ≈ 세로위치 기반 거리 (비율 1/R ~ R)          → 멀리 있는 큰 빨간 것 배제
+      ④ 연속 CONFIRM_FRAMES 프레임 이상                              → 한 프레임 노이즈 배제
+    같은 대상 재탐지(MERGE_RADIUS 안)는 새로 추가하지 않고 더 가까이서 본 추정으로 위치를 갱신한다."""
+
     def __init__(self, cam_w, cam_h, cam_fov, debug_dir=None, color=TARGET_COLOR):
         self.cam_w, self.cam_h, self.cam_fov = cam_w, cam_h, cam_fov
         self.debug_dir = debug_dir
         self.color = color
         self.targets: List[Tuple[float, float]] = []
+        self._best_dist: List[float] = []          # 각 대상을 가장 가까이서 본 거리 (갱신 판단용)
         self.step_i = 0
         self.last_cam_save = -1e9
         self.last_det = None
+        self.consecutive = 0
+        self.rejected = {"horizon": 0, "inconsistent": 0, "far": 0}
+        self.n_snapshots = 0
 
     def process(self, image_bytes, pose, t) -> Optional[Tuple[float, float]]:
         self.step_i += 1
@@ -63,14 +88,43 @@ class TargetDetector:
         det = vision.detect_apple(bgr, self.color, MIN_APPLE_RADIUS_PX)
         self.last_det = det
         new_target = None
+        accepted = False
         if det is not None:
-            (tx, ty), bearing, dist = target_world_from_pixel(pose, det[0], det[2], self.cam_w, self.cam_fov)
-            if dist < MAX_DETECT_DIST and all(math.hypot(tx - f[0], ty - f[1]) > MERGE_RADIUS for f in self.targets):
-                self.targets.append((tx, ty))
-                new_target = (tx, ty)
-                print(f"[{t:.1f}s] ★ {self.color} 사과 발견: 화면 x={det[0]:.0f} y={det[1]:.0f} r={det[2]:.1f}px → 방향 "
-                      f"{math.degrees(bearing):.0f}°, 거리 {dist:.2f} m, 월드 ({tx:.2f}, {ty:.2f})   (지금까지 {len(self.targets)}개)")
+            cx, cy, r = det
+            (tx, ty), bearing, d_r = target_world_from_pixel(pose, cx, r, self.cam_w, self.cam_fov)
+            d_row = distance_from_row(cy, self.cam_h, self.cam_w, self.cam_fov)
+            if cy < self.cam_h / 2 + HORIZON_MARGIN_PX:
+                self.rejected["horizon"] += 1
+            elif not (1.0 / CONSISTENCY_RATIO < d_r / d_row < CONSISTENCY_RATIO):
+                self.rejected["inconsistent"] += 1
+            elif d_r > MAX_DETECT_DIST:
+                self.rejected["far"] += 1
+            else:
+                accepted = True
+                self.consecutive += 1
+                if self.consecutive >= CONFIRM_FRAMES:
+                    # 두 추정의 기하평균이 한쪽 편향을 줄인다
+                    dist = math.sqrt(d_r * d_row)
+                    tx = pose[0] + dist * math.cos(pose[2] + bearing)
+                    ty = pose[1] + dist * math.sin(pose[2] + bearing)
+                    idx = next((i for i, f in enumerate(self.targets) if math.hypot(tx - f[0], ty - f[1]) < MERGE_RADIUS), None)
+                    if idx is None:
+                        self.targets.append((tx, ty)); self._best_dist.append(dist)
+                        new_target = (tx, ty)
+                        print(f"[{t:.1f}s] ★ {self.color} 사과 발견: 화면 ({cx:.0f},{cy:.0f}) r={r:.1f}px → 방향 {math.degrees(bearing):.0f}°, "
+                              f"거리 반지름기준 {d_r:.2f} / 세로기준 {d_row:.2f} → {dist:.2f} m, 월드 ({tx:.2f}, {ty:.2f})  (지금까지 {len(self.targets)}개)")
+                        self._snapshot(bgr, det)
+                    elif dist < self._best_dist[idx]:        # 더 가까이서 봤으면 위치 갱신
+                        self.targets[idx] = (tx, ty); self._best_dist[idx] = dist
+        if not accepted:
+            self.consecutive = 0
         if self.debug_dir and t - self.last_cam_save >= 0.5:
             self.last_cam_save = t
             vision.save_debug_frame(vision.draw_detection(bgr, det, self.color), os.path.join(self.debug_dir, "cam.jpg"))
         return new_target
+
+    def _snapshot(self, bgr, det):
+        if self.debug_dir and self.n_snapshots < 20:
+            self.n_snapshots += 1
+            vision.save_debug_frame(vision.draw_detection(bgr, det, self.color),
+                                    os.path.join(self.debug_dir, f"det_{self.n_snapshots}.jpg"))

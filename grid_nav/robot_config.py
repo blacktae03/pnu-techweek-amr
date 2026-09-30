@@ -22,11 +22,14 @@ LIDAR_FRONT_INDEX = 180     # ranges[180]=정면, [0]=후방, [90]=왼쪽, [270]
 # --- 카메라 [확인됨: apartment.wbt] ---
 CAM_FOV = 1.0472            # [rad] 60°
 CAM_W, CAM_H = 640, 480
-CAM_HEIGHT = 0.11           # [m] 바닥에서 카메라 중심까지 대략 (TB3 상판 0.19 - 0.08). 비전 거리 일관성 검사에 사용
+CAM_HEIGHT = 0.088          # [m] 바닥에서 카메라 광축까지. [확인됨 2026-09-30] 시험 사과(거리 1.45/1.53 m) 두 프레임에서 역산 (0.091, 0.085)
+CAM_YAW_OFFSET = 0.0        # [rad] 카메라 광축이 로봇 정면과 이루는 각. [확인됨] 0.5 m 옆 사과의 bearing 오차 0.5° → 0
 
 # --- 컴퍼스 [확인됨 2026-09-30 breakroom 에서 ground truth 대조] ---
 COMPASS_SIGN = -1.0         # atan2(c[1], c[0]) 는 시계방향 + → -1 을 곱해 반시계 + 규약으로
 
 # --- 미션/대상 [당일 규칙 확인] ---
-APPLE_DIAMETER = 0.05       # [m] 사과 PROTO "0.05 x 0.05 x 0.05"
+APPLE_DIAMETER = 0.085      # [m] 색 분할로 잡히는 '겉보기' 지름. [확인됨] PROTO 메시는 반지름 0.05(지름 0.10)지만 그늘진 가장자리가
+                            #     마스크에서 빠져 1.45 m 에서 r=16.5px, 1.53 m 에서 r=14.4px → 유효 지름 0.086/0.080
+APPLE_CENTER_Z = 0.05       # [m] 사과 중심 높이 (translation z=0.05)
 START_POSE_APARTMENT = (-0.3, -7.5, math.pi)

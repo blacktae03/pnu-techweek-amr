@@ -22,7 +22,8 @@ from astar import plan_path, build_cost_map
 from robot_config import ROBOT_RADIUS, LIDAR_MAX_RANGE
 
 SAFETY_MARGIN = 0.10        # 팽창 여유. 문/가구 사이가 좁으면 0.06 까지 줄여 볼 것
-MAP_HALF_M = 15.0           # 시작점 기준 ±15 m (apartment 기준). 작으면 dropped_hits 경고
+MAP_HALF_M = 20.0           # 시작점 기준 ±20 m. apartment 서쪽 끝이 시작점(-0.3)에서 -13 m 이고 위치 추정 오차가 수 m 까지
+                            # 날 수 있어 15 m 로는 지도 밖으로 나감(5차 실행: 목표가 지도 밖 → 무한 회전). 800x800 격자.
 RESOLUTION = 0.05           # 600x600 격자. A* 가 느리면 0.075 로
 REPLAN_PERIOD_S = 1.0
 MIN_FRONTIER_CELLS = 6
@@ -83,3 +84,14 @@ class GridPlanner:
 
     def give_up_goal(self, goal_xy):
         self.blacklist.append(tuple(goal_xy))
+
+    def mark_obstacle(self, x, y, radius_m=0.15):
+        """지도에 벽을 강제로 찍는다. LiDAR 가 못 보는 낮은 물체(공, 사과, 고양이)에 걸렸을 때 그 자리를 막아
+        A* 가 다시는 그리로 경로를 내지 않게 한다. log-odds 를 최대치로 두어 다음 스캔의 miss 로 금방 지워지지 않게."""
+        r_c = int(np.ceil(radius_m / self.spec.resolution))
+        r0, c0 = self.spec.world_to_grid(x, y)
+        rr, cc = np.ogrid[-r_c:r_c + 1, -r_c:r_c + 1]
+        disk = (rr ** 2 + cc ** 2) <= r_c ** 2
+        R = np.clip(r0 + rr, 0, self.spec.rows - 1); C = np.clip(c0 + cc, 0, self.spec.cols - 1)
+        self.grid.log_odds[R, C] = np.where(disk, self.grid.l_clamp, self.grid.log_odds[R, C])
+        self._ternary = None
