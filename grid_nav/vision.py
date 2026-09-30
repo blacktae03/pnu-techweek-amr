@@ -65,7 +65,24 @@ def object_extent(mask, cx, cy, r):
     return max(1.0, w - (k // 2 * 2)), max(1.0, h - 2 * k)
 
 
-def detect_apple(bgr, color="red", min_radius_px=3.0, max_radius_px=60.0, min_circularity=0.45, max_aspect=1.5):
+def red_outside_blob(mask, cx, cy, r, span=6.0):
+    """덩어리 위아래 세로 띠(폭 = 지름, 높이 = ±span·r) 안에서 '덩어리 자신을 뺀' 같은 색 픽셀 수 / 덩어리 면적.
+
+    왜: 소화기·병처럼 라벨로 갈라진 물체는 조각 사이 틈이 얼마든 위아래에 같은 색이 더 있다.
+        사과는 위아래에 같은 색이 없다 (0 에 가까움). 연결 여부에 기대지 않아 틈 크기와 무관하게 동작한다."""
+    H, W = mask.shape
+    x0, x1 = int(max(0, cx - r)), int(min(W, cx + r + 1))
+    y0, y1 = int(max(0, cy - span * r)), int(min(H, cy + span * r + 1))
+    strip = mask[y0:y1, x0:x1] > 0
+    by0, by1 = int(max(0, cy - r - 1)), int(min(H, cy + r + 2))
+    inside = strip.copy(); inside[:] = False
+    inside[max(0, by0 - y0):max(0, by1 - y0), :] = True
+    outside_px = int((strip & ~inside).sum())
+    return outside_px / max(1.0, np.pi * r * r)
+
+
+def detect_apple(bgr, color="red", min_radius_px=3.0, max_radius_px=60.0, min_circularity=0.45, max_aspect=1.5,
+                 max_outside_ratio=0.10):
     """가장 큰 색 덩어리의 (cx, cy, r) [px]. 없거나 조건에 안 맞으면 None.
     max_radius_px : 사과는 0.3 m 앞에서도 반지름 ≈ 46 px. 그보다 크면 바닥·벽 같은 큰 면 → 무시.
     min_circularity: contour 면적 / 외접원 면적. 사과는 둥글어 0.6~0.8, 바닥 얼룩·가구 모서리는 낮다.
@@ -84,6 +101,8 @@ def detect_apple(bgr, color="red", min_radius_px=3.0, max_radius_px=60.0, min_ci
         return None
     w_obj, h_obj = object_extent(mask, cx, cy, r)
     if h_obj / w_obj > max_aspect:
+        return None
+    if red_outside_blob(mask, cx, cy, r) > max_outside_ratio:       # 위아래에 같은 색이 더 있음 → 키 큰 물체의 조각
         return None
     M = cv2.moments(c)
     if M["m00"] > 0:                                       # 무게중심이 외접원 중심보다 안정적
