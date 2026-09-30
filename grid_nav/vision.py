@@ -81,12 +81,13 @@ def red_outside_blob(mask, cx, cy, r, span=6.0):
     return outside_px / max(1.0, np.pi * r * r)
 
 
-def detect_apple(bgr, color="red", min_radius_px=3.0, max_radius_px=60.0, min_circularity=0.45, max_aspect=1.5,
-                 max_outside_ratio=0.10):
+def detect_apple(bgr, color="red", min_radius_px=3.0, max_radius_px=60.0, min_circularity=0.70,
+                 min_aspect=0.65, max_aspect=1.5, max_outside_ratio=0.10):
     """가장 큰 색 덩어리의 (cx, cy, r) [px]. 없거나 조건에 안 맞으면 None.
     max_radius_px : 사과는 0.3 m 앞에서도 반지름 ≈ 46 px. 그보다 크면 바닥·벽 같은 큰 면 → 무시.
-    min_circularity: contour 면적 / 외접원 면적. 사과는 둥글어 0.6~0.8, 바닥 얼룩·가구 모서리는 낮다.
-    max_aspect    : 덩어리가 속한 전체 빨간 물체의 높이/폭. 사과 ≈ 1, 소화기·병은 2~4 → 거부 (object_extent 참고)."""
+    min_circularity: contour 면적 / 외접원 면적. [실측 2026-09-30 카탈로그] 사과 0.88~0.92, 누운 캔 0.50, 상자 스티커 0.45,
+                     카펫 무늬 0.45, 소화기 조각 0.36~0.40 → 0.70 이 양쪽에 여유.
+    min/max_aspect: 덩어리가 속한 전체 빨간 물체의 높이/폭. 사과 0.97~1.03, 누운 캔 0.47, 카펫 0.40, 소화기 2.1 → 0.65~1.5."""
     if cv2 is None:
         return None
     mask = color_mask(bgr, color)
@@ -100,7 +101,7 @@ def detect_apple(bgr, color="red", min_radius_px=3.0, max_radius_px=60.0, min_ci
     if cv2.contourArea(c) / (np.pi * r * r + 1e-6) < min_circularity:
         return None
     w_obj, h_obj = object_extent(mask, cx, cy, r)
-    if h_obj / w_obj > max_aspect:
+    if not (min_aspect <= h_obj / w_obj <= max_aspect):
         return None
     if red_outside_blob(mask, cx, cy, r) > max_outside_ratio:       # 위아래에 같은 색이 더 있음 → 키 큰 물체의 조각
         return None
