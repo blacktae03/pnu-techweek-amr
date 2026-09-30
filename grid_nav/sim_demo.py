@@ -34,7 +34,7 @@ import numpy as np
 
 from geometry import GridSpec, wrap_angle, lidar_to_world, robot_to_world, world_to_robot, setup_korean_font
 from occupancy_grid import OccupancyGrid, inflate
-from frontier import frontier_mask, cluster_frontiers, select_frontier, bfs_distance_map
+from frontier import frontier_mask, cluster_frontiers, select_frontier, bfs_distance_map, bfs_distance_map_coarse
 from astar import plan_path, build_cost_map
 from localization import WheelOdometry, CorrelativeMatcher
 from dwa import DWAParams, dwa_control, path_lookahead_point
@@ -147,6 +147,26 @@ def build_world(seed=0):
 # ======================================================================
 # 2. 가짜 센서
 # ======================================================================
+def build_world_big(seed=0):
+    """apartment 에 가까운 16 m x 12 m, 방 6개 + 복도. 방을 끝내지 않고 옮겨 다니는 비효율을 보기 위한 월드."""
+    rng = np.random.default_rng(seed)
+    w = FakeWorld(16.0, 12.0, 0.05)
+    t = 0.15
+    w.add_rect(0, 0, 16, t); w.add_rect(0, 12 - t, 16, 12); w.add_rect(0, 0, t, 12); w.add_rect(16 - t, 0, 16, 12)
+    # 가로 복도 y 5.5~6.5 (벽 두 줄), 위·아래 각 3개 방
+    w.add_rect(0, 5.5 - t / 2, 16, 5.5 + t / 2); w.add_rect(0, 6.5 - t / 2, 16, 6.5 + t / 2)
+    for x in (5.3, 10.7):                                   # 방 사이 세로 벽 (아래·위)
+        w.add_rect(x - t / 2, 0, x + t / 2, 5.5); w.add_rect(x - t / 2, 6.5, x + t / 2, 12)
+    for cx in (2.6, 8.0, 13.4):                             # 각 방에서 복도로 나가는 문 (폭 1.0)
+        w.clear_rect(cx - 0.5, 5.5 - t, cx + 0.5, 5.5 + t); w.clear_rect(cx - 0.5, 6.5 - t, cx + 0.5, 6.5 + t)
+    # 가구(기둥) 각 방에 1~2개
+    for (x0, y0) in [(1.0, 1.0), (7.0, 3.5), (12.0, 1.5), (2.0, 9.5), (8.5, 8.0), (13.5, 10.0), (4.0, 3.0), (14.0, 4.0)]:
+        jx, jy = rng.uniform(-0.3, 0.3, 2)
+        w.add_rect(x0 + jx, y0 + jy, x0 + jx + 0.6, y0 + jy + 0.6)
+    w.targets = [(14.8, 11.3), (0.8, 4.8), (9.5, 0.8)]
+    return w
+
+
 def raycast_lidar(world: FakeWorld, pose, angles, max_range=6.0, noise_std=0.01, rng=None):
     """레이캐스팅 LiDAR. 각 빔을 따라 해상도/2 간격으로 점을 찍고 첫 벽까지 거리를 반환.
     벽을 못 만나면 inf (실제 LiDAR 도 inf 또는 max_range 를 줌 → occupancy_grid 가 처리).
@@ -297,6 +317,7 @@ class Mission:
         self.scan_pts = np.zeros((0, 2))
         self.log: List[str] = []
         self.replans = 0
+        self.goal_changes = 0
         # --reactive: 강의 Algorithm 3 으로 돌아다니며 지도만 만들다가, 정해진 스텝 뒤 A* 로 복귀
         self.reactive = Algorithm3(ReactiveParams()) if args.reactive else None
         self.last_ranges = None
@@ -415,12 +436,26 @@ class Mission:
                 #   단점: 초반에 자잘한 미확인 구석을 쫓아 지그재그가 늘어 지도 완성은 늦어짐.
                 unseen = (self.ternary == 0) & (self.inflated != 1) & ~self.seen
                 self.fmask = self.fmask | unseen
+            # 목표 유지(hysteresis): 현재 목표 반경 0.5 m 안에 frontier 가 남아 있고 아직 도달 전이면 그대로 (exploration.GridPlanner 와 동일 규칙)
+            if self.args.keep_goal and self.goal_xy is not None and self.path is not None:
+                gr, gc = self.spec.world_to_grid(self.goal_xy[0], self.goal_xy[1])
+                k = int(0.5 / self.spec.resolution)
+                near_mask = self.fmask[max(0, gr - k):gr + k + 1, max(0, gc - k):gc + k + 1]
+                d_goal = np.hypot(self.goal_xy[0] - self.est.x, self.goal_xy[1] - self.est.y)
+                not_black = all(np.hypot(self.goal_xy[0] - b[0], self.goal_xy[1] - b[1]) > 0.4 for b in self.blacklist)
+                if near_mask.any() and d_goal > 0.3 and not_black:
+                    path = self.plan_to(self.goal_xy)
+                    if path is not None:
+                        self._set_path(path, self.goal_xy)
+                        return
             frontiers = cluster_frontiers(self.fmask, min_size=self.args.min_frontier)
             rr, cc = self.spec.world_to_grid(self.est.x, self.est.y)
-            dmap = bfs_distance_map(self.inflated == 0, (int(rr), int(cc))) if self.args.path_dist else None
+            dmap = bfs_distance_map_coarse(self.inflated == 0, (int(rr), int(cc)), 4) if self.args.path_dist else None
             for _ in range(5):          # 최대 5개 후보까지 시도
                 f = select_frontier(frontiers, self.est.pose, self.spec,
-                                    blacklist_xy=self.blacklist, dist_map=dmap)
+                                    blacklist_xy=self.blacklist, dist_map=dmap,
+                                    w_dist=self.args.w_dist, w_size=self.args.w_size, size_cap=self.args.size_cap,
+                                    w_turn=self.args.w_turn, w_detour=self.args.w_detour)
                 if f is None:
                     break
                 goal = f.goal_xy(self.spec)
@@ -490,6 +525,8 @@ class Mission:
             self._set_path(path, self.start_xy)
 
     def _set_path(self, path, goal):
+        if self.goal_xy is None or np.hypot(goal[0] - self.goal_xy[0], goal[1] - self.goal_xy[1]) > 0.5:
+            self.goal_changes += 1          # 왕복/진동 지표: 목표가 실제로 바뀐 횟수
         self.path = path
         self.goal_xy = goal
         self.follower = PathFollower(path, lookahead=self.args.lookahead)
@@ -746,7 +783,16 @@ def parse_args():
     p.add_argument("--beams", type=int, default=360)
     p.add_argument("--lidar-range", type=float, default=3.5, help="LiDAR 최대 사거리 [m] (LDS-01 3.5)")
     p.add_argument("--min-frontier", type=int, default=6, help="frontier 클러스터 최소 칸 수")
-    p.add_argument("--path-dist", action="store_true", help="frontier 선택에 BFS 경로 거리 사용")
+    p.add_argument("--path-dist", dest="path_dist", action="store_true", default=True,
+                   help="frontier 선택에 BFS 경로 거리 사용 (기본 on, 4배 축소 격자). small 월드 스윕: 마지막 대상 발견 752→452 스텝")
+    p.add_argument("--no-path-dist", dest="path_dist", action="store_false", help="직선거리 사용 (비교용)")
+    p.add_argument("--w-dist", type=float, default=1.0, help="frontier 점수: 거리 가중치")
+    p.add_argument("--w-size", type=float, default=0.05, help="frontier 점수: 크기 가중치")
+    p.add_argument("--size-cap", type=int, default=40, help="frontier 점수: 크기 상한")
+    p.add_argument("--w-turn", type=float, default=0.3, help="frontier 점수: 방향 전환 벌점")
+    p.add_argument("--w-detour", type=float, default=0.0, help="frontier 점수: 경로/직선 비율>1.5 우회 벌점 (--path-dist 필요)")
+    p.add_argument("--keep-goal", type=int, default=1, help="목표 유지(hysteresis) 1/0. exploration.GridPlanner 와 같은 규칙")
+    p.add_argument("--world", choices=["small", "big"], default="small", help="가짜 세계: small(10x8, 방 3) / big(16x12, 방 6+복도)")
     p.add_argument("--cam-fov", type=float, default=60.0, help="가짜 카메라 시야각 [deg] (Webots 월드 1.0472 rad)")
     p.add_argument("--cam-range", type=float, default=2.5, help="가짜 카메라 탐지 거리 [m]")
     p.add_argument("--min-unseen", type=int, default=40, help="SEARCH 에서 수색할 미확인 덩어리 최소 칸 수")
@@ -769,7 +815,7 @@ def parse_args():
 def main():
     args = parse_args()
     rng = np.random.default_rng(args.seed)
-    world = build_world(args.seed)
+    world = build_world_big(args.seed) if args.world == "big" else build_world(args.seed)
     if args.pedestrian:
         # 왼쪽 아래 방을 돌아다니는 사람 (0.3 m/s). apartment.wbt 의 Pedestrian 은 0.2 m/s
         world.add_pedestrian([(1.2, 3.8), (4.3, 3.8), (4.3, 1.3), (3.3, 1.3), (3.3, 3.0), (1.2, 3.8)], radius=0.2, speed=0.3)
@@ -801,6 +847,8 @@ def main():
     elapsed = time.perf_counter() - t0
     known = np.mean(mission.ternary != -1) * 100
     print("-" * 60)
+    tr = np.array(robot.trail) if robot.trail else np.zeros((1, 2))
+    print(f"목표 변경 {mission.goal_changes}회   이동거리 {np.sum(np.hypot(np.diff(tr[:, 0]), np.diff(tr[:, 1]))):.1f} m")
     print(f"종료 상태: {mission.state}   스텝: {mission.step_count}   실시간 {elapsed:.1f}s "
           f"(스텝당 {1000 * elapsed / max(1, mission.step_count):.1f} ms)")
     print(f"지도 채움: {known:.1f}%   대상 발견 {len(mission.found_targets)}/{len(world.targets)}, "

@@ -175,6 +175,27 @@ def bfs_distance_map(passable, start_rc, max_iters=None):
     return dist
 
 
+def bfs_distance_map_coarse(passable, start_rc, factor=4):
+    """bfs_distance_map 의 빠른 버전: 격자를 factor 배 거칠게 줄여 BFS 한 뒤 다시 늘려 돌려준다.
+
+    왜: 800x800 격자에서 원본 BFS 는 반복 횟수(최장 홉 수 ≈ 400) × 배열 연산이라 수 초가 걸린다.
+        4배 거칠게 하면 200x200, 홉 100 이하 → 수십 ms. 거리 오차는 최대 factor 칸(20 cm) 수준으로 우선순위 비교엔 충분.
+    거친 칸은 '안의 원래 칸 절반 이상이 통과 가능' 하면 통과 가능으로 본다 (좁은 문은 factor 4 에서 20 cm 폭까지 살아남음).
+    반환: 원본 격자 크기의 dist 배열 (단위: 원본 칸 수, 도달 불가 inf) → 기존 dist_map 과 같은 방식으로 인덱싱.
+    """
+    R, C = passable.shape
+    Rc, Cc = (R + factor - 1) // factor, (C + factor - 1) // factor
+    pad = np.zeros((Rc * factor, Cc * factor), dtype=bool)
+    pad[:R, :C] = passable
+    blocks = pad.reshape(Rc, factor, Cc, factor).mean(axis=(1, 3))
+    coarse = blocks >= 0.5
+    sr, sc = int(start_rc[0]) // factor, int(start_rc[1]) // factor
+    coarse[sr, sc] = True                                    # 로봇 칸은 항상 통과 가능 (팽창 벽 안에 있을 때 대비)
+    d = bfs_distance_map(coarse, (sr, sc))                   # 거친 칸 단위 홉 수
+    fine = np.repeat(np.repeat(d, factor, axis=0), factor, axis=1)[:R, :C] * factor
+    return fine
+
+
 # ----------------------------------------------------------------------
 # 4. 목표 선택
 # ----------------------------------------------------------------------
@@ -183,7 +204,7 @@ def select_frontier(frontiers: Sequence[Frontier], robot_pose, spec: GridSpec,
                     blacklist_radius=0.4,
                     w_dist=1.0, w_size=0.05, size_cap=40, w_turn=0.3,
                     min_goal_dist=0.3,
-                    dist_map=None) -> Optional[Frontier]:
+                    dist_map=None, w_detour=0.0, detour_thresh=1.5) -> Optional[Frontier]:
     """후보 frontier 중 하나를 고릅니다. 없으면 None (= 탐색 완료 신호).
 
     점수 (클수록 좋음):
@@ -194,6 +215,9 @@ def select_frontier(frontiers: Sequence[Frontier], robot_pose, spec: GridSpec,
       - size       : 큰 frontier = 넓게 열린 방향 = 정보 이득이 큼. 다만 무한정 커지면
                      거리보다 우선하게 되므로 size_cap 으로 상한.
       - heading 차 : 지금 보고 있는 방향에 가까운 목표를 약간 선호. 회전 시간 절약 + 진동 감소.
+      - detour     : (dist_map 있을 때) 경로거리/직선거리 비율이 detour_thresh 를 넘으면 (비율-1)*w_detour 벌점.
+                     "벽 너머 바로 옆" 처럼 직선으론 가깝지만 방을 나가 돌아가야 하는 frontier 를 뒤로 미룬다
+                     → 지금 있는 방을 먼저 끝내는 효과.
     가중치는 실험으로 잡는 값입니다. 데모에서 로봇이 이상하게 움직이면 이 숫자들을 먼저 만져 보세요.
 
     blacklist_xy : 과거에 도달 실패한 목표들. 그 근처 frontier 는 건너뜀 (같은 곳에 계속 시도 방지).
@@ -211,20 +235,26 @@ def select_frontier(frontiers: Sequence[Frontier], robot_pose, spec: GridSpec,
             if np.any(np.hypot(bl[:, 0] - gx, bl[:, 1] - gy) < blacklist_radius):
                 continue
         # --- 거리 ---
+        straight = float(np.hypot(gx - rx, gy - ry))
+        detour_pen = 0.0
         if dist_map is not None:
             d_cells = float(dist_map[f.goal_rc])
             if not np.isfinite(d_cells):
                 continue                     # 도달 불가 (벽으로 막힘)
             dist = d_cells * spec.resolution
+            ratio = dist / max(straight, 0.3)
+            if ratio > detour_thresh:
+                detour_pen = w_detour * (ratio - 1.0)
         else:
-            dist = float(np.hypot(gx - rx, gy - ry))
+            dist = straight
         if dist < min_goal_dist:
             continue
         # --- 방향 차 ---
         heading_err = abs(wrap_angle(np.arctan2(gy - ry, gx - rx) - rth))
         score = (w_size * min(f.size, size_cap)
                  - w_dist * dist
-                 - w_turn * heading_err)
+                 - w_turn * heading_err
+                 - detour_pen)
         f.score = score
         if score > best_score:
             best, best_score = f, score
