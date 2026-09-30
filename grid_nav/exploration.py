@@ -17,7 +17,7 @@ import numpy as np
 
 from geometry import GridSpec
 from occupancy_grid import OccupancyGrid, inflate
-from frontier import frontier_mask, cluster_frontiers, select_frontier, bfs_distance_map_coarse
+from frontier import frontier_mask, cluster_frontiers, select_frontier, bfs_distance_map_coarse, bfs_distance_map
 from astar import plan_path, build_cost_map
 from robot_config import ROBOT_RADIUS, LIDAR_MAX_RANGE, CAM_FOV
 
@@ -32,7 +32,8 @@ BLACKLIST_TTL_S = 90.0      # 포기한 목표를 이만큼만 피한다. 영구
                             # "탐색 경로 없음"(기준선 c54afcb: 525 s BLOCKED) 으로 끝난다. 시간이 지나면 다시 시도.
 # frontier 점수 가중치 (sim_demo 스윕으로 결정 — docs/WORKLOG.md feat/exploration 절 참고)
 USE_PATH_DIST = True        # 직선거리 대신 BFS 경로거리 (벽 너머 "가짜로 가까운" frontier 방지)
-BFS_COARSE_FACTOR = 4       # 경로거리 BFS 격자 축소 배율 (800x800 → 200x200, 수십 ms)
+BFS_COARSE_FACTOR = 2       # 경로거리 BFS 격자 축소 배율. 4(20 cm 칸, 18 ms) 는 팽창 뒤 폭 ~0.4 m 인 문을 막아 도달 가능 frontier 를
+                            # 0 개로 판정(1차 실행 618 s "탐색 후보 없음": 전해상도 BFS 는 3개 도달). 2(10 cm, 80 ms) 는 전해상도와 일치.
 W_DIST = 1.0
 W_SIZE = 0.05
 SIZE_CAP = 40
@@ -83,6 +84,18 @@ class GridPlanner:
         self._refresh()
         return self._inflated
 
+    def _path_dist_map(self, pose, clusters):
+        """BFS 경로거리 지도. 축소 격자로 먼저 계산하고, 후보 군집이 하나도 도달 불가로 나오면(좁은 문이 축소에 막힘)
+        전해상도(≈0.6 s) 로 다시 계산한다."""
+        if not (USE_PATH_DIST and clusters):
+            return None
+        r, c = self.spec.world_to_grid(pose[0], pose[1])
+        free = self._inflated == 0
+        dm = bfs_distance_map_coarse(free, (int(r), int(c)), BFS_COARSE_FACTOR)
+        if not any(np.isfinite(dm[f.goal_rc]) for f in clusters):
+            dm = bfs_distance_map(free, (int(r), int(c)))
+        return dm
+
     def next_exploration_goal(self, pose, current_goal=None, keep_radius=GOAL_KEEP_RADIUS) -> Optional[Tuple[float, float]]:
         """다음 탐색 목표. current_goal 을 주면 '목표 유지' 규칙: 현재 목표 반경 keep_radius 안에 아직 frontier 가
         남아 있으면 그대로 둔다 (매초 1등이 바뀌면 로봇이 두 목표 사이를 왔다갔다 한다)."""
@@ -105,10 +118,7 @@ class GridPlanner:
             if not goal_passable:
                 self.give_up_goal(current_goal, self.now)
         frontiers = cluster_frontiers(mask, min_size=MIN_FRONTIER_CELLS)
-        dist_map = None
-        if USE_PATH_DIST and frontiers:
-            r, c = self.spec.world_to_grid(pose[0], pose[1])
-            dist_map = bfs_distance_map_coarse(self._inflated == 0, (int(r), int(c)), BFS_COARSE_FACTOR)
+        dist_map = self._path_dist_map(pose, frontiers)
         f = select_frontier(frontiers, pose, self.spec, blacklist_xy=self.blacklist, dist_map=dist_map,
                             w_dist=W_DIST, w_size=W_SIZE, size_cap=SIZE_CAP, w_turn=W_TURN, w_detour=W_DETOUR)
         return f.goal_xy(self.spec) if f else None
@@ -192,8 +202,7 @@ class GridPlanner:
         clusters = cluster_frontiers(unseen, min_size=MIN_UNSEEN_CELLS)
         if not clusters:
             return None
-        r, c = self.spec.world_to_grid(pose[0], pose[1])
-        dist_map = bfs_distance_map_coarse(self._inflated == 0, (int(r), int(c)), BFS_COARSE_FACTOR) if USE_PATH_DIST else None
+        dist_map = self._path_dist_map(pose, clusters)
         f = select_frontier(clusters, pose, self.spec, blacklist_xy=self.blacklist, dist_map=dist_map,
                             w_dist=W_DIST, w_size=0.01, size_cap=200, w_turn=W_TURN)
         return f.goal_xy(self.spec) if f else None
