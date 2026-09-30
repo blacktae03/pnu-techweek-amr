@@ -229,6 +229,7 @@ def run(robot, start_pose, ground_truth=None, map_save_path="map.npy", map_save_
     detector = TargetDetector(camera.getWidth(), camera.getHeight(), camera.getFov(), debug_dir)
     motion = MotionController()
     motion.set_timing(dt, LIDAR_PERIOD_MS / 1000.0)
+    motion.set_obstacle_map(planner.grid)      # costmap 공유: DWA 정적 장애물 = 지도 벽, 동적 = 지도에 없는 스캔 점
 
     # --- 미션 상태 ---
     x0, y0 = start_pose[0], start_pose[1]

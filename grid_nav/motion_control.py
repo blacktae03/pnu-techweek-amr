@@ -16,17 +16,12 @@ import numpy as np
 
 from geometry import GridSpec, lidar_to_world
 from dwa import DWAParams, dwa_control, path_lookahead_point
-from occupancy_grid import OccupancyGrid
 from robot_config import ROBOT_RADIUS, WHEEL_RADIUS, WHEEL_SEPARATION, MAX_WHEEL_SPEED, LIDAR_MAX_RANGE
 
 LOOKAHEAD = 0.25            # [m] 길면 커브 안쪽 가로지름, 짧으면 지그재그
 CRUISE_V = 0.15             # [m/s] 순항 속도 (TB3 최대 0.22)
-STATIC_CONFIRM_SCANS = 8
-STATIC_CONFIRM_SECONDS = 0.8  # 스캔 빈도가 높아져도 정적 판정 시간을 단축하지 않는다
-STATIC_GAP_PERIODS = 5.0      # 같은 셀 재관측 사이 허용 간격(스캔 주기 배수). LDS-01 잡음 σ≈1.5 cm 로 점이 5 cm 셀
-                              # 경계를 오가면 한 셀은 2~4 스캔마다 찍힌다 → 2.5 로는 이력이 계속 리셋돼 벽이 영원히 '동적'.
-STATIC_NEIGHBOR = 1           # 정적 판정 때 이 반경(셀)의 이웃 이력까지 본다 (3x3). 이력 전파는 하지 않으므로 걷는 사람은
-                              # 셀마다 1~2회 관측에 그쳐 정적으로 굳지 않는다.
+STATIC_LOGODDS = 1.5          # planner 지도에서 이 값 초과 셀 = 벽(정적 장애물). p_hit 0.7 → 2회 관측이면 넘는다
+STATIC_WINDOW_M = 3.0         # 로봇 주변 이 반경의 벽 셀만 DWA 에 넘김 (예측 1.5 s × 0.22 m/s ≪ 3 m)
 STOP_DIST = ROBOT_RADIUS + 0.10   # 정면 이 거리 안에 무언가 있으면 전진 금지
 RECOVER_V = 0.08                  # [m/s] DWA 복구모드에서 정면이 비었을 때 경로 추종 전진 속도
 
@@ -74,13 +69,10 @@ class MotionController:
                                 wheel_separation=WHEEL_SEPARATION)
         # command 인터페이스에는 planner가 없다. 동일 센서로 별도 이력 지도만
         # 유지하며, 장애물 자체는 언제나 현재 스캔에서 가져온다.
-        self.grid = None
+        self.grid = None                       # set_obstacle_map(planner.grid) 로 공유되는 점유 격자 (costmap)
         self._last_ranges = None
         self._owns_grid = True
         self._scan_index = 0
-        self._last_hit_scan = None
-        self._stable_hit_count = None
-        self._first_hit_time = self._last_hit_time = None
         self.scan_period = 0.1
         self._elapsed = 0.0
         self._scan_timestamp = None
@@ -164,37 +156,17 @@ class MotionController:
             return 0.0, 0.0
         return float(v), float(w)
 
-    def _reset_static_evidence(self):
-        """점유 log-odds 외에 위치가 일정 시간 유지됐는지도 별도로 기록한다."""
-        shape = self.grid.spec.shape
-        self._last_hit_scan = np.full(shape, -1_000_000, dtype=np.int32)
-        self._stable_hit_count = np.zeros(shape, dtype=np.uint16)
-        self._first_hit_time = np.full(shape, -np.inf)
-        self._last_hit_time = np.full(shape, -np.inf)
-        self._scan_index = 0
-
     def set_obstacle_map(self, grid):
-        """통합 시 planner.grid를 공유할 수 있다. 공유 지도는 여기서 갱신하지 않는다.
-
-        기존 adapter는 이 메서드 없이도 작동한다. 공유할 때에는 adapter가
-        planner.update_map 이후 command를 호출해야 한다.
-        """
+        """planner.grid(OccupancyGrid) 공유 — costmap 기반 DWA (fix/integration (i)).
+        정적 장애물 = 이 지도의 벽 셀(log-odds>1.5) 중 로봇 3 m 안 셀 중심점. 동적 = 지도에 없는 현재 스캔 점(사람).
+        (이전: 컨트롤러 자체 지도 + 같은 5 cm 셀 8스캔 지속 판정 → LiDAR 잡음 1.5 cm 로 벽 26~37 % 가 동적으로 남아 정체.)"""
         self.grid = grid
         self._owns_grid = False
         self._last_ranges = None
         self._last_scan_time = None
-        self._reset_static_evidence()
 
     def _obstacles(self, pose, ranges, angles):
-        if self.grid is None:
-            self.grid = OccupancyGrid(
-                GridSpec.from_size(30.0, 30.0, 0.05, center=pose[:2]),
-                max_range=LIDAR_MAX_RANGE)
-            self._reset_static_evidence()
-        elif self._last_hit_scan is None or self._last_hit_scan.shape != self.grid.spec.shape:
-            self._reset_static_evidence()
-
-        # 거리값이 같다는 사실만으로 중복 프레임이라고 판단하지 않는다.
+        # 같은 스캔이면 이전 분류 재사용 (취득 당시 pose 기준 점 — 최신 pose 로 재변환하면 벽이 로봇을 따라 움직임)
         scan_time = self._elapsed if self._scan_timestamp is None else self._scan_timestamp
         if self._scan_timestamp is not None:
             new_scan = self._last_scan_time is None or scan_time > self._last_scan_time
@@ -203,64 +175,39 @@ class MotionController:
                         or not np.array_equal(ranges, self._last_ranges, equal_nan=True)
                         or scan_time - self._last_scan_time >= self.scan_period - 1e-9)
         if not new_scan:
-            # 이미 받은 스캔은 취득 당시 pose로 변환한 점을 재사용한다.
-            # 최신 pose로 다시 변환하면 정지한 벽도 로봇을 따라 움직이게 된다.
             return self._cached_obstacles
+        self._scan_index += 1
+        self._last_ranges = ranges.copy()
+        self._last_scan_time = scan_time
+        self._last_scan_received = self._elapsed
 
         finite = np.isfinite(ranges) & (ranges > 0.05) & (ranges < LIDAR_MAX_RANGE)
         points = lidar_to_world(angles[finite], ranges[finite], pose)
-        rr, cc = self.grid.spec.world_to_grid(points[:, 0], points[:, 1])
-        if new_scan:
-            self._scan_index += 1
-            self._last_ranges = ranges.copy()
-            self._last_scan_time = scan_time
-            self._last_scan_received = self._elapsed
+        if self.grid is None:
+            # 지도 공유 전(단독 사용): 모든 스캔 점을 동적으로 취급 (보수적)
+            self._cached_obstacles = (np.empty((0, 2)), points)
+            return self._cached_obstacles
 
-            in_bounds = self.grid.spec.in_bounds(rr, cc)
-            flat = np.unique(rr[in_bounds] * self.grid.spec.cols + cc[in_bounds])
-            hit_r, hit_c = np.divmod(flat, self.grid.spec.cols)
-            previous = self._last_hit_time[hit_r, hit_c]
-            continuing = scan_time - previous <= STATIC_GAP_PERIODS * self.scan_period
-            self._first_hit_time[hit_r, hit_c] = np.where(
-                continuing, self._first_hit_time[hit_r, hit_c], scan_time)
-            count = self._stable_hit_count[hit_r, hit_c]
-            self._stable_hit_count[hit_r, hit_c] = np.where(
-                continuing, np.minimum(count.astype(np.uint32) + 1, 65535), 1
-            ).astype(np.uint16)
-            self._last_hit_scan[hit_r, hit_c] = self._scan_index
-            self._last_hit_time[hit_r, hit_c] = scan_time
-
-        # log-odds만으로 분류하면 천천히 움직이는 사람도 몇 프레임 만에 정적으로
-        # 굳는다. 이 점이 찍힌 같은 셀 자체가 8회 이상 지속 관측돼야 정적으로 본다.
-        # 주변 셀까지 빌려오면 벽 옆을 걷는 사람을 벽으로 오인할 수 있어 쓰지 않는다.
-        in_bounds = self.grid.spec.in_bounds(rr, cc)
-        r, c = self.grid.spec.clip(rr, cc)
-        # 판정은 3x3 이웃 중 '최근 관측된' 셀의 최장 이력으로 한다 (fix/integration).
-        # 왜: 잡음으로 점이 인접 셀을 오가면 셀 하나의 이력만으로는 벽의 26~37 % 가 정적 확정을 영원히 못 받았고,
-        #     그 점들이 dyn_margin(0.455 m) 을 요구해 실내 통로에서 궤적 87~96 % 가 탈락 → 후진/회전만 반복했다.
-        offs = np.arange(-STATIC_NEIGHBOR, STATIC_NEIGHBOR + 1)
-        nr = np.clip(r[None, :] + np.repeat(offs, len(offs))[:, None], 0, self.grid.spec.rows - 1)
-        nc = np.clip(c[None, :] + np.tile(offs, len(offs))[:, None], 0, self.grid.spec.cols - 1)
-        nb_recent = scan_time - self._last_hit_time[nr, nc] <= STATIC_GAP_PERIODS * self.scan_period
-        nb_count = np.where(nb_recent, self._stable_hit_count[nr, nc], 0).max(axis=0)
-        nb_first = np.where(nb_recent, self._first_hit_time[nr, nc], np.inf).min(axis=0)
-        persistent = (in_bounds & nb_recent.any(axis=0)
-                      & (scan_time - nb_first >= STATIC_CONFIRM_SECONDS - 1e-9)
-                      & (nb_count >= STATIC_CONFIRM_SCANS))
-        nb_logodds = self.grid.log_odds[nr, nc].max(axis=0)
-
-        if new_scan and self._owns_grid:
-            # Unconfirmed hits are the dynamic/unknown set. Skip those beams entirely
-            # instead of turning them into free rays through the moving obstacle.
-            # Thus a person is still present in `dynamic` for this DWA cycle, while
-            # its transient position does not accumulate in the static log-odds map.
-            map_ranges = ranges.copy()
-            map_ranges[np.isnan(map_ranges) | np.isneginf(map_ranges)] = 0.0
-            hit_indices = np.flatnonzero(finite)
-            map_ranges[hit_indices[~persistent]] = 0.0
-            self.grid.update(pose, angles, map_ranges)
-        static = persistent & (nb_logodds > 1.5)
-        self._cached_obstacles = (points[static], points[~static])
+        spec = self.grid.spec
+        lo = self.grid.log_odds
+        # --- 정적: 로봇 반경 STATIC_WINDOW_M 안의 벽 셀 중심점 ---
+        r0, c0 = spec.world_to_grid(pose[0], pose[1]); k = int(STATIC_WINDOW_M / spec.resolution)
+        ra, rb = max(0, int(r0) - k), min(spec.rows, int(r0) + k + 1); ca, cb = max(0, int(c0) - k), min(spec.cols, int(c0) + k + 1)
+        wr, wc = np.nonzero(lo[ra:rb, ca:cb] > STATIC_LOGODDS)
+        if wr.size:
+            wx, wy = spec.grid_to_world(wr + ra, wc + ca)
+            static = np.column_stack((np.asarray(wx, float), np.asarray(wy, float)))
+        else:
+            static = np.empty((0, 2))
+        # --- 동적: 지도에 벽으로 없는 곳(3x3 이웃 최대 log-odds ≤ STATIC_LOGODDS)에 찍힌 스캔 점 = 사람/새 물체 ---
+        if points.shape[0]:
+            rr, cc = spec.world_to_grid(points[:, 0], points[:, 1])
+            r = np.clip(np.asarray(rr, int), 1, spec.rows - 2); c = np.clip(np.asarray(cc, int), 1, spec.cols - 2)
+            nb = np.max([lo[r + dr, c + dc] for dr in (-1, 0, 1) for dc in (-1, 0, 1)], axis=0)
+            dynamic = points[nb <= STATIC_LOGODDS]
+        else:
+            dynamic = points
+        self._cached_obstacles = (static, dynamic)
         return self._cached_obstacles
 
     def command(self, pose, path, ranges, angles, state):
