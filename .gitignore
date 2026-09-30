@@ -11,3 +11,11 @@ worlds/.*.wbproj
 models/
 .DS_Store
 controllers/tb3_catalog/catalog*/*.jpg
+# 실행 산출물 (9/30 정리)
+controllers/tb3_gridnav/*.npz
+controllers/tb3_gridnav/*.npy
+controllers/tb3_gridnav/*.jpg
+controllers/tb3_catalog/*.jpg
+**/__pycache__/
+docs/*.pdf
+!docs/images/*.png

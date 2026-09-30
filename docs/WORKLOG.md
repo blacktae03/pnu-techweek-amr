@@ -98,3 +98,12 @@
 | 1차 21b4945 | 0/2 (623 s 중단) | — | 9 % | 4 | 1 (보라 사과) |
 | 2차 d4eea79 | 1/2 (492.7 s) | — (1075 s) | 10 % | 3 | 0 |
 | 3차 ed79dac | 2/2 (222.8 / 525.6 s) | 566.2 s | 20 % | 0 | 0 |
+
+---
+
+## 정리 (9/30 밤, 발표 후)
+
+- PR #5 fix/integration → main 병합 (main b6c8cda). grid_nav/controllers/worlds 는 시연 코드 a500408 과 동일.
+- README 최종판(규칙 2사과, 결과표 기준선/1~3차/시연, 상태 기계, 모듈 표, 실패→원인→수정 12항목, 한계, 문서 색인). docs/readme 의 발표 문서(PRESENTATION·DEMO_SCRIPT·TALK_SCRIPT·SPEECH·state_machine.png) 반영.
+- 실행 산출물(map.npz, confirmed.jpg 등)·PDF 를 .gitignore 로 제외, 추적 중이던 confirmed.jpg 제거.
+- 태그 v1.0-hackathon. 병합된 브랜치(feat/vision, feat/exploration, fix/integration, docs/readme) 원격 삭제. feat/sound 는 미병합 보관.
