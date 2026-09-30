@@ -1,0 +1,118 @@
+file,type,name,x,y,z,view,red_px,detected,r,is_apple
+001_Solid_floor_v2.jpg,Solid,floor,-4.96,-6.5,0.0,2,237,0,,0
+002_Pose_Pose_v2.jpg,Pose,Pose,-2.09,-2.3,0.0,2,13002,0,,0
+003_BiscuitBox_biscuit_box_1__v0.jpg,BiscuitBox,biscuit box(1),-5.93,-2.44,0.51,0,163,0,,0
+004_CerealBox_cereal_box_v3.jpg,CerealBox,cereal box,-1.31,-3.12,0.73,3,5558,0,,0
+005_HoneyJar_honey_jar_v3.jpg,HoneyJar,honey jar,-2.1,-3.51,0.72,3,12374,0,,0
+006_JamJar_jam_jar_v3.jpg,JamJar,jam jar,-1.64,-2.98,0.72,3,3260,0,,0
+007_Laptop_laptop_v0.jpg,Laptop,laptop,-5.93,-2.93,0.52,0,23,0,,0
+008_Laptop_laptop_v2.jpg,Laptop,laptop,-5.93,-2.93,0.52,2,457,0,,0
+009_CardboardBox_cardboard_box_v3.jpg,CardboardBox,cardboard box,-0.53,-5.5,0.3,3,189,0,,0
+010_CardboardBox_cardboard_box_1__v2.jpg,CardboardBox,cardboard box(1),-0.53,-5.5,0.77,2,128,0,,0
+011_CardboardBox_cardboard_box_1__v3.jpg,CardboardBox,cardboard box(1),-0.53,-5.5,0.77,3,5896,0,,0
+012_RubberDuck_rubber_duck_v0.jpg,RubberDuck,rubber duck,-5.39,-11.08,0.51,0,1734,1,24.4,0
+013_RubberDuck_rubber_duck_v3.jpg,RubberDuck,rubber duck,-5.39,-11.08,0.51,3,699,1,15.7,0
+014_Cabinet_cabinet_4_2__v3.jpg,Cabinet,cabinet 4(2),-0.18,-4.63,0.0,3,622,0,,0
+015_Book_book_3__v0.jpg,Book,book(3),-5.61,-2.44,0.53,0,362,0,,0
+016_Cabinet_cabinet_9__v0.jpg,Cabinet,cabinet(9),-5.45,-10.0,0.0,0,2140,1,27.2,0
+017_Cabinet_cabinet_9__v3.jpg,Cabinet,cabinet(9),-5.45,-10.0,0.0,3,5754,1,44.8,0
+018_Cabinet_cabinet_8__v0.jpg,Cabinet,cabinet(8),-5.81,-10.17,0.0,0,4130,1,38.9,0
+019_WoodenChair_wooden_chair_4__v3.jpg,WoodenChair,wooden chair(4),-3.4,-2.91,0.0,3,66,0,,0
+020_WoodenChair_wooden_chair_6__v2.jpg,WoodenChair,wooden chair(6),-2.36,-3.61,0.0,2,3482,0,,0
+021_WoodenChair_wooden_chair_6__v3.jpg,WoodenChair,wooden chair(6),-2.36,-3.61,0.0,3,11869,0,,0
+022_WoodenChair_wooden_chair_1__v3.jpg,WoodenChair,wooden chair(1),-0.6,-3.61,0.0,3,12325,0,,0
+023_WoodenChair_wooden_chair_3__v2.jpg,WoodenChair,wooden chair(3),-1.47,-2.75,0.0,2,10097,0,,0
+024_WoodenChair_wooden_chair_3__v3.jpg,WoodenChair,wooden chair(3),-1.47,-2.75,0.0,3,2313,0,,0
+025_RoundTable_round_table_v3.jpg,RoundTable,round table,-1.43,-3.62,0.0,3,9068,0,,0
+026_Cookware_cookware_v0.jpg,Cookware,cookware,-1.57,-0.46,1.12,0,136263,0,,0
+027_Radiator_radiator_4__v2.jpg,Radiator,radiator(4),-3.24,-6.88,0.36,2,616,0,,0
+028_Radiator_radiator_1__v1.jpg,Radiator,radiator(1),-0.28,-1.53,0.36,1,57744,0,,0
+029_Radiator_radiator_1__v2.jpg,Radiator,radiator(1),-0.28,-1.53,0.36,2,15314,0,,0
+030_Radiator_radiator_1__v3.jpg,Radiator,radiator(1),-0.28,-1.53,0.36,3,21731,0,,0
+031_Solid_door_6__v2.jpg,Solid,door(6),-3.89,-3.95,0.0,2,44,0,,0
+032_Solid_door_6__v3.jpg,Solid,door(6),-3.89,-3.95,0.0,3,132,0,,0
+033_Solid_door_3__v2.jpg,Solid,door(3),-6.97,-7.24,0.0,2,77,0,,0
+034_Solid_door_4__v1.jpg,Solid,door(4),-0.91,-6.6,0.0,1,2577,0,,0
+035_Carafe_carafe_v1.jpg,Carafe,carafe,-11.14,-1.59,0.7,1,88,0,,0
+036_Plate_plate_9__v3.jpg,Plate,plate(9),-2.28,-3.63,0.72,3,11102,0,,0
+037_Plate_plate_10__v3.jpg,Plate,plate(10),-1.45,-2.75,0.72,3,28590,0,,0
+038_Knife_knife_v3.jpg,Knife,knife,-2.29,-3.75,0.73,3,4036,0,,0
+039_Glass_glass_v3.jpg,Glass,glass,-1.51,-2.9,0.72,3,18107,0,,0
+040_WaterBottle_water_bottle_v3.jpg,WaterBottle,water bottle,-1.7,-3.28,0.72,3,4959,0,,0
+041_Glass_glass_8__v3.jpg,Glass,glass(8),-2.14,-3.7,0.73,3,11569,0,,0
+042_Knife_knife_1__v3.jpg,Knife,knife(1),-1.58,-2.77,0.73,3,1157,0,,0
+043_Fork_fork_v3.jpg,Fork,fork,-2.26,-3.51,0.73,3,12122,0,,0
+044_Fork_fork_1__v3.jpg,Fork,fork(1),-1.32,-2.77,0.73,3,29669,0,,0
+045_Plate_plate_8__v0.jpg,Plate,plate(8),-9.37,-1.64,0.74,0,34,0,,0
+046_Plate_plate_2__v1.jpg,Plate,plate(2),-11.19,-1.3,0.74,1,301,1,10.5,0
+047_Plate_plate_2__v2.jpg,Plate,plate(2),-11.19,-1.3,0.74,2,56,0,,0
+048_Plate_plate_3__v0.jpg,Plate,plate(3),-11.19,-1.93,0.74,0,557,1,13.9,0
+049_Plate_plate_3__v1.jpg,Plate,plate(3),-11.19,-1.93,0.74,1,196,0,,0
+050_Plate_plate_4__v2.jpg,Plate,plate(4),-10.48,-1.93,0.74,2,260,0,,0
+051_Plate_plate_7__v0.jpg,Plate,plate(7),-9.77,-1.95,0.74,0,99,0,,0
+052_Wineglass_wine_glass_1__v0.jpg,Wineglass,wine glass(1),-10.38,-1.82,0.7,0,264,1,9.6,0
+053_Wineglass_wine_glass_1__v2.jpg,Wineglass,wine glass(1),-10.38,-1.82,0.7,2,47,1,4.3,0
+054_Wineglass_wine_glass_2__v0.jpg,Wineglass,wine glass(2),-11.06,-1.82,0.7,0,506,1,13.4,0
+055_Wineglass_wine_glass_6__v1.jpg,Wineglass,wine glass(6),-11.3,-1.42,0.7,1,216,1,9.7,0
+056_Wineglass_wine_glass_6__v2.jpg,Wineglass,wine glass(6),-11.3,-1.42,0.7,2,56,1,5.4,0
+057_Wineglass_wine_glass_4__v2.jpg,Wineglass,wine glass(4),-10.63,-1.42,0.7,2,48,1,3.4,0
+058_Wineglass_wine_glass_5__v0.jpg,Wineglass,wine glass(5),-9.88,-1.42,0.7,0,185,1,7.9,0
+059_Chair_chair_1_2__v1.jpg,Chair,chair 1(2),-11.17,-1.29,-0.0,1,302,1,10.5,0
+060_Chair_chair_1_2__v2.jpg,Chair,chair 1(2),-11.17,-1.29,-0.0,2,41,0,,0
+061_Chair_chair_1_5__v0.jpg,Chair,chair 1(5),-11.16,-2.0,-0.0,0,528,1,13.4,0
+062_Chair_chair_1_6__v0.jpg,Chair,chair 1(6),-10.45,-2.0,-0.0,0,180,0,,0
+063_Chair_chair_1_7__v0.jpg,Chair,chair 1(7),-9.75,-2.0,-0.0,0,155,1,7.2,0
+064_Chair_chair_1_7__v2.jpg,Chair,chair 1(7),-9.75,-2.0,-0.0,2,41,1,3.2,0
+065_Chair_chair_1_3__v0.jpg,Chair,chair 1(3),-8.87,-1.01,0.09,0,22,0,,0
+066_Apple_apple_v0.jpg,Apple,apple,-10.19,-1.62,0.79,0,54,0,,1
+067_Apple_apple_v1.jpg,Apple,apple,-10.19,-1.62,0.79,1,0,0,,1
+068_Apple_apple_v2.jpg,Apple,apple,-10.19,-1.62,0.79,2,42,0,,1
+069_Apple_apple_v3.jpg,Apple,apple,-10.19,-1.62,0.79,3,0,0,,1
+070_Orange_orange_v3.jpg,Orange,orange,-1.45,-3.51,0.79,3,18166,0,,0
+071_Orange_orange_2__v3.jpg,Orange,orange(2),-1.48,-3.62,0.79,3,17436,0,,0
+072_Orange_orange_3__v3.jpg,Orange,orange(3),-1.39,-3.59,0.79,3,9865,0,,0
+073_FruitBowl_fruit_bowl_1__v3.jpg,FruitBowl,fruit bowl(1),-1.46,-3.58,0.73,3,15416,0,,0
+074_Table_table_5__v0.jpg,Table,table(5),-5.78,-2.57,0.02,0,440,0,,0
+075_BeerBottle_beer_bottle_v0.jpg,BeerBottle,beer bottle,-5.98,-2.16,0.55,0,22,0,,0
+076_Can_can_v0.jpg,Can,can,-6.08,-2.3,0.61,0,26,0,,0
+077_BeerBottle_beer_bottle_2__v0.jpg,BeerBottle,beer bottle(2),-6.05,-2.63,0.55,0,647,0,,0
+078_Sofa_sofa_2_v0.jpg,Sofa,sofa 2,-7.76,-2.72,-0.0,0,50,1,4.0,0
+079_Sofa_sofa_2_v2.jpg,Sofa,sofa 2,-7.76,-2.72,-0.0,2,45,0,,0
+080_Carpet_carpet_v0.jpg,Carpet,carpet,-5.8,-2.56,-0.01,0,437,0,,0
+081_BunchOfSunFlowers_bunch_of_sunflowers_v0.jpg,BunchOfSunFlowers,bunch of sunflowers,-7.07,-0.48,0.0,0,42,1,4.0,0
+082_FireExtinguisher_fire_extinguisher_v1.jpg,FireExtinguisher,fire extinguisher,-0.44,-8.16,-0.04,1,11074,0,,0
+083_FireExtinguisher_fire_extinguisher_v2.jpg,FireExtinguisher,fire extinguisher,-0.44,-8.16,-0.04,2,9657,0,,0
+084_OfficeTelephone_office_telephone_v2.jpg,OfficeTelephone,office telephone,-4.5,-6.58,1.06,2,281,0,,0
+085_BathroomSink_sink_2__v0.jpg,BathroomSink,sink(2),-5.44,-9.99,1.07,0,2023,1,26.6,0
+086_BathroomSink_sink_v2.jpg,BathroomSink,sink,-8.35,-6.75,1.07,2,44,0,,0
+087_CeilingSpotLight_ceiling_light_7__v2.jpg,CeilingSpotLight,ceiling light(7),-3.02,-6.46,1.14,2,294,0,,0
+088_RedApple_Red_Apple_v0.jpg,RedApple,Red Apple,-12.02,-3.02,0.05,0,1444,1,22.6,1
+089_RedApple_Red_Apple_v1.jpg,RedApple,Red Apple,-12.02,-3.02,0.05,1,1558,1,23.7,1
+090_RedApple_Red_Apple_v2.jpg,RedApple,Red Apple,-12.02,-3.02,0.05,2,0,0,,1
+091_RedApple_Red_Apple_v3.jpg,RedApple,Red Apple,-12.02,-3.02,0.05,3,0,0,,1
+092_RedApple_Red_Apple_1__v0.jpg,RedApple,Red Apple(1),-5.34,-10.54,0.05,0,1464,1,22.7,1
+093_RedApple_Red_Apple_1__v1.jpg,RedApple,Red Apple(1),-5.34,-10.54,0.05,1,0,0,,1
+094_RedApple_Red_Apple_1__v2.jpg,RedApple,Red Apple(1),-5.34,-10.54,0.05,2,0,0,,1
+095_RedApple_Red_Apple_1__v3.jpg,RedApple,Red Apple(1),-5.34,-10.54,0.05,3,0,0,,1
+096_GreenApple_Green_Apple_v0.jpg,GreenApple,Green Apple,-8.86,-7.67,0.05,0,0,0,,1
+097_GreenApple_Green_Apple_v1.jpg,GreenApple,Green Apple,-8.86,-7.67,0.05,1,0,0,,1
+098_GreenApple_Green_Apple_v2.jpg,GreenApple,Green Apple,-8.86,-7.67,0.05,2,0,0,,1
+099_GreenApple_Green_Apple_v3.jpg,GreenApple,Green Apple,-8.86,-7.67,0.05,3,0,0,,1
+100_PurpleApple_Purple_Apple_v0.jpg,PurpleApple,Purple Apple,-2.84,-1.34,0.05,0,0,0,,1
+101_PurpleApple_Purple_Apple_v1.jpg,PurpleApple,Purple Apple,-2.84,-1.34,0.05,1,0,0,,1
+102_PurpleApple_Purple_Apple_v2.jpg,PurpleApple,Purple Apple,-2.84,-1.34,0.05,2,0,0,,1
+103_PurpleApple_Purple_Apple_v3.jpg,PurpleApple,Purple Apple,-2.84,-1.34,0.05,3,0,0,,1
+104_OrangeApple_Orange_Apple_v0.jpg,OrangeApple,Orange Apple,-8.28,-4.81,0.05,0,0,0,,1
+105_OrangeApple_Orange_Apple_v1.jpg,OrangeApple,Orange Apple,-8.28,-4.81,0.05,1,0,0,,1
+106_OrangeApple_Orange_Apple_v2.jpg,OrangeApple,Orange Apple,-8.28,-4.81,0.05,2,433,0,,1
+107_OrangeApple_Orange_Apple_v3.jpg,OrangeApple,Orange Apple,-8.28,-4.81,0.05,3,0,0,,1
+108_PurpleApple_Purple_Apple_1__v0.jpg,PurpleApple,Purple Apple(1),-7.96,-11.68,0.05,0,0,0,,1
+109_PurpleApple_Purple_Apple_1__v1.jpg,PurpleApple,Purple Apple(1),-7.96,-11.68,0.05,1,0,0,,1
+110_PurpleApple_Purple_Apple_1__v2.jpg,PurpleApple,Purple Apple(1),-7.96,-11.68,0.05,2,0,0,,1
+111_PurpleApple_Purple_Apple_1__v3.jpg,PurpleApple,Purple Apple(1),-7.96,-11.68,0.05,3,0,0,,1
+112_GreenApple_Green_Apple_1__v0.jpg,GreenApple,Green Apple(1),-8.37,-4.98,0.05,0,0,0,,1
+113_GreenApple_Green_Apple_1__v1.jpg,GreenApple,Green Apple(1),-8.37,-4.98,0.05,1,0,0,,1
+114_GreenApple_Green_Apple_1__v2.jpg,GreenApple,Green Apple(1),-8.37,-4.98,0.05,2,216,0,,1
+115_GreenApple_Green_Apple_1__v3.jpg,GreenApple,Green Apple(1),-8.37,-4.98,0.05,3,0,0,,1
+116_Can_can_1__v0.jpg,Can,can(1),-6.19,-3.3,-0.0,0,497,0,,0
+117_Can_can_1__v2.jpg,Can,can(1),-6.19,-3.3,-0.0,2,410,0,,0
