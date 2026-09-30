@@ -17,7 +17,7 @@ import numpy as np
 
 from geometry import GridSpec
 from occupancy_grid import OccupancyGrid, inflate
-from frontier import frontier_mask, cluster_frontiers, select_frontier
+from frontier import frontier_mask, cluster_frontiers, select_frontier, bfs_distance_map_coarse
 from astar import plan_path, build_cost_map
 from robot_config import ROBOT_RADIUS, LIDAR_MAX_RANGE
 
@@ -28,6 +28,14 @@ RESOLUTION = 0.05           # 600x600 격자. A* 가 느리면 0.075 로
 REPLAN_PERIOD_S = 1.0
 MIN_FRONTIER_CELLS = 6
 GOAL_KEEP_RADIUS = 0.5      # 현재 목표 이 반경 안에 frontier 가 남아 있으면 목표 유지 (진동 방지)
+# frontier 점수 가중치 (sim_demo 스윕으로 결정 — docs/WORKLOG.md feat/exploration 절 참고)
+USE_PATH_DIST = True        # 직선거리 대신 BFS 경로거리 (벽 너머 "가짜로 가까운" frontier 방지)
+BFS_COARSE_FACTOR = 4       # 경로거리 BFS 격자 축소 배율 (800x800 → 200x200, 수십 ms)
+W_DIST = 1.0
+W_SIZE = 0.05
+SIZE_CAP = 40
+W_TURN = 0.3
+W_DETOUR = 0.0              # 경로/직선 비율이 1.5 넘는 frontier 벌점 (방 먼저 끝내기)
 
 
 class GridPlanner:
@@ -74,7 +82,12 @@ class GridPlanner:
             if still_frontier and far_enough and not_blacklisted:
                 return tuple(current_goal)
         frontiers = cluster_frontiers(mask, min_size=MIN_FRONTIER_CELLS)
-        f = select_frontier(frontiers, pose, self.spec, blacklist_xy=self.blacklist)
+        dist_map = None
+        if USE_PATH_DIST and frontiers:
+            r, c = self.spec.world_to_grid(pose[0], pose[1])
+            dist_map = bfs_distance_map_coarse(self._inflated == 0, (int(r), int(c)), BFS_COARSE_FACTOR)
+        f = select_frontier(frontiers, pose, self.spec, blacklist_xy=self.blacklist, dist_map=dist_map,
+                            w_dist=W_DIST, w_size=W_SIZE, size_cap=SIZE_CAP, w_turn=W_TURN, w_detour=W_DETOUR)
         return f.goal_xy(self.spec) if f else None
 
     def plan(self, pose, goal_xy):
