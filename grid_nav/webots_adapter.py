@@ -29,6 +29,7 @@ from robot_config import (ROBOT_RADIUS, LIDAR_NAME, LIDAR_PERIOD_MS, LIDAR_MAX_R
                           COMPASS_SIGN, START_POSE_APARTMENT)
 from pose_estimation import PoseEstimator, WheelOdometry, CompassHeading          # 재수출 (tb3_reactive 가 씀)
 from exploration import GridPlanner, REPLAN_PERIOD_S
+from astar import plan_path
 from target_detection import TargetDetector, target_world_from_pixel
 from motion_control import MotionController, lookahead_control, to_wheel_speeds
 
@@ -166,7 +167,20 @@ def run(robot, start_pose, ground_truth=None, map_save_path="map.npy", map_save_
     scan_hist: List[Tuple[float, np.ndarray]] = []     # (t, ranges) 최근 스캔들 (slip 감지용)
     slip_time = 0.0; slip_pose_ref = None; recover_until = -1e9; slip_events = 0; slip_goal_count = {}
     last_plan_t = last_save = last_log = last_disp = -1e9
+    last_map_warn = -1e9
+    visit_fail = 0; return_fail = 0      # VISIT/RETURN 에서 경로 실패 연속 횟수 (무한 회전 방지)
     v = w = 0.0
+
+    def clip_to_map(g):
+        """목표가 지도 밖이면 가장자리에서 0.5 m 안쪽으로 클립 (위치 오차로 목표가 지도 밖에 찍히는 경우)."""
+        if g is None:
+            return None
+        sp = planner.spec
+        gx = min(max(g[0], sp.origin_x + 0.5), sp.origin_x + sp.width_m - 0.5)
+        gy = min(max(g[1], sp.origin_y + 0.5), sp.origin_y + sp.height_m - 0.5)
+        if (gx, gy) != (g[0], g[1]):
+            print(f"[{t:.1f}s] 목표 ({g[0]:.2f}, {g[1]:.2f}) 가 지도 밖 → ({gx:.2f}, {gy:.2f}) 로 클립")
+        return (gx, gy)
 
     while robot.step(timestep) != -1:
         t = robot.getTime()
@@ -234,23 +248,44 @@ def run(robot, start_pose, ground_truth=None, map_save_path="map.npy", map_save_
                         state = "VISIT" if found_targets else "RETURN"; print(f"[{t:.1f}s] 탐색 완료 → {state}")
                 else:
                     no_frontier_count = 0
+            target_goal = None
             if state == "VISIT":
                 remaining = [tg for tg in found_targets if tg not in visited]
                 if remaining:
-                    goal = min(remaining, key=lambda tg: math.hypot(tg[0] - pose[0], tg[1] - pose[1]))
+                    target_goal = min(remaining, key=lambda tg: math.hypot(tg[0] - pose[0], tg[1] - pose[1]))
+                    goal = target_goal
                     if math.hypot(goal[0] - pose[0], goal[1] - pose[1]) < ARRIVE_DIST:
-                        visited.append(goal); print(f"[{t:.1f}s] 대상 도착 ({goal[0]:.2f}, {goal[1]:.2f})"); goal = None
+                        visited.append(goal); print(f"[{t:.1f}s] 대상 도착 ({goal[0]:.2f}, {goal[1]:.2f})"); goal = None; target_goal = None
+                        visit_fail = 0
                 else:
                     state = "RETURN"
             if state == "RETURN":
                 goal = (x0, y0)
                 if math.hypot(pose[0] - x0, pose[1] - y0) < HOME_DIST:
                     state = "DONE"; goal = None; print(f"[{t:.1f}s] 복귀 완료")
+            goal = clip_to_map(goal)
             path = planner.plan(pose, goal) if goal is not None else None
             if goal is not None and path is None:
-                planner.give_up_goal(goal)
-            if planner.grid.dropped_hits > 100:
-                print("!! 지도 밖 측정값 많음 → exploration.MAP_HALF_M 확인")
+                if state == "VISIT" and target_goal is not None:
+                    visit_fail += 1
+                    if visit_fail >= 3:                      # 3번 연속 경로 실패 → 그 대상 포기 (무한 회전 방지)
+                        visited.append(target_goal); visit_fail = 0
+                        print(f"[{t:.1f}s] 대상 ({target_goal[0]:.2f}, {target_goal[1]:.2f}) 까지 경로 3회 실패 → 포기")
+                elif state == "RETURN":
+                    return_fail += 1
+                    if return_fail >= 5:                     # 5번 연속 실패 → 미탐색 칸도 지나가도록 재시도
+                        path = plan_path(planner.get_inflated(), planner.spec, (pose[0], pose[1]), goal,
+                                         unknown_passable=True, cost_map=planner._cost)
+                        if path is None and return_fail == 5:
+                            print(f"[{t:.1f}s] 복귀 경로 없음 (미탐색 통과 허용해도) → 정지")
+                else:
+                    planner.give_up_goal(goal)
+            else:
+                if state == "VISIT": visit_fail = 0
+                if state == "RETURN": return_fail = 0
+            if planner.grid.dropped_hits > 100 and t - last_map_warn >= 10.0:
+                last_map_warn = t
+                print(f"[{t:.1f}s] !! 지도 밖 측정값 {planner.grid.dropped_hits}개 → exploration.MAP_HALF_M 확인")
 
         # (5) 속도 명령  [feat/dwa]   (환경변수 GRIDNAV_HOLD=초 를 주면 그동안 정지: 비전 테스트용)
         v, w = motion.command(pose, path, ranges, angles, state)
@@ -282,7 +317,7 @@ def run(robot, start_pose, ground_truth=None, map_save_path="map.npy", map_save_
             err = f" 위치오차={math.hypot(pose[0] - gt[0], pose[1] - gt[1]):.2f}m" if gt else ""
             print(f"[{t:6.1f}s] {state:8s} pose=({pose[0]:.2f},{pose[1]:.2f},{math.degrees(pose[2]):.0f}°){err} "
                   f"목표={None if goal is None else (round(goal[0], 2), round(goal[1], 2))} 경로점={0 if not path else len(path)} "
-                  f"v={v:.2f} w={w:+.2f} 대상={len(found_targets)} 헛바퀴={slip_events} 비전거부={detector.rejected} 지도밖hit={planner.grid.dropped_hits}")
+                  f"v={v:.2f} w={w:+.2f} 대상={len(found_targets)} 헛바퀴={slip_events} 보정={estimator.corrections} 비전거부={detector.rejected} 지도밖hit={planner.grid.dropped_hits}")
 
 
 if __name__ == "__main__":

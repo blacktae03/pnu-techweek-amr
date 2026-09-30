@@ -66,4 +66,5 @@ else:
 
 webots_adapter.run(robot, start_pose,
                    ground_truth=ground_truth if node is not None else None,
-                   map_save_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), "map.npy"))
+                   map_save_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), "map.npy"),
+                   use_scan_matching=True)      # LiDAR scan matching 으로 odometry 드리프트·헛바퀴 보정 (localization.CorrelativeMatcher)
