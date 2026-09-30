@@ -21,6 +21,14 @@ from geometry import wrap_angle
 from robot_config import WHEEL_RADIUS, WHEEL_SEPARATION, COMPASS_SIGN
 
 
+def _finite_scalar(value):
+    """센서 초기화 중 None/NaN/inf는 사용할 수 없는 관측이다."""
+    try:
+        return value is not None and math.isfinite(float(value))
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
 class WheelOdometry:
     """엔코더(PositionSensor, 라디안 누적) 차이로 pose 적분. 실전에서는 scan matching 보정과 함께 사용.
 
@@ -35,18 +43,23 @@ class WheelOdometry:
         self.prev = None
 
     def update(self, phi_l, phi_r, theta_external=None, gyro_z=None, dt=None):
-        if self.prev is None:
-            self.prev = (phi_l, phi_r)
-            return self.pose
-        dl = (phi_l - self.prev[0]) * WHEEL_RADIUS
-        dr = (phi_r - self.prev[1]) * WHEEL_RADIUS
-        self.prev = (phi_l, phi_r)
+        dl = dr = 0.0
+        if _finite_scalar(phi_l) and _finite_scalar(phi_r):
+            current = (float(phi_l), float(phi_r))
+            if self.prev is not None:
+                dl = (current[0] - self.prev[0]) * WHEEL_RADIUS
+                dr = (current[1] - self.prev[1]) * WHEEL_RADIUS
+            self.prev = current
+        else:
+            # 누락 구간은 자세 변화가 불명확하다. 다음 유효 쌍에서 기준만 다시 잡고
+            # 미측정 이동량을 한 번에 현재 heading으로 적분하지 않는다.
+            self.prev = None
         ds = 0.5 * (dl + dr)
-        if theta_external is not None:            # 컴퍼스 등 절대 heading 이 있으면 그것을 사용
-            new_theta = theta_external
+        if _finite_scalar(theta_external):       # 컴퍼스 등 절대 heading 이 있으면 그것을 사용
+            new_theta = wrap_angle(float(theta_external))
             dtheta = wrap_angle(new_theta - self.theta)
-        elif gyro_z is not None and dt is not None:
-            dtheta = gyro_z * dt
+        elif _finite_scalar(gyro_z) and _finite_scalar(dt) and dt > 0:
+            dtheta = float(gyro_z) * float(dt)
             new_theta = wrap_angle(self.theta + dtheta)
         else:
             dtheta = (dr - dl) / WHEEL_SEPARATION
@@ -57,6 +70,8 @@ class WheelOdometry:
         return self.pose
 
     def set_pose(self, pose):
+        if len(pose) != 3 or not all(_finite_scalar(v) for v in pose):
+            raise ValueError("pose must contain three finite values")
         self.x, self.y, self.theta = float(pose[0]), float(pose[1]), float(pose[2])
 
     @property
@@ -74,6 +89,12 @@ class CompassHeading:
         self.raw0 = None
 
     def update(self, compass_values):
+        if compass_values is None or len(compass_values) < 2:
+            return None
+        if not all(_finite_scalar(v) for v in compass_values[:2]):
+            return None
+        if math.hypot(compass_values[0], compass_values[1]) < 1e-9:
+            return None
         raw = math.atan2(compass_values[1], compass_values[0])
         if self.raw0 is None:
             self.raw0 = raw
@@ -96,13 +117,20 @@ class PoseEstimator:
 
     def update(self, phi_l, phi_r, compass_values, gyro_z=None, dt=None,
                ranges=None, angles=None, log_odds=None):
-        theta = self.heading.update(compass_values)
-        pose = self.odom.update(phi_l, phi_r, theta_external=theta, gyro_z=gyro_z, dt=dt)
+        if self.heading.raw0 is None:
+            # 첫 유효 컴퍼스가 늦게 들어오면 그동안의 wheel/gyro 회전을 보존해
+            # 현재 예측 heading에 캘리브레이션한다 (시작 heading으로 되돌리지 않음).
+            pose = self.odom.update(phi_l, phi_r, gyro_z=gyro_z, dt=dt)
+            self.heading.theta0 = pose[2]
+            self.heading.update(compass_values)
+        else:
+            theta = self.heading.update(compass_values)
+            pose = self.odom.update(phi_l, phi_r, theta_external=theta, gyro_z=gyro_z, dt=dt)
         # 지도 갱신은 adapter가 이 호출 이후에 수행한다. 여기서는 읽기만 한다.
         if (self.matcher is not None and ranges is not None
                 and angles is not None and log_odds is not None):
             corrected = self.matcher.correct(pose, angles, ranges, log_odds)
-            if corrected[:2] != pose[:2]:
+            if all(_finite_scalar(v) for v in corrected[:2]) and corrected[:2] != pose[:2]:
                 self.corrections += 1
                 # 위치만 보정하고 heading 은 컴퍼스를 믿는다 (컴퍼스가 절대각이라 더 정확)
                 self.odom.set_pose((corrected[0], corrected[1], pose[2]))
