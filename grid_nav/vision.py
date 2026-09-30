@@ -81,7 +81,7 @@ def red_outside_blob(mask, cx, cy, r, span=6.0):
     return outside_px / max(1.0, np.pi * r * r)
 
 
-def detect_apple(bgr, color="red", min_radius_px=3.0, max_radius_px=80.0, min_circularity=0.70,
+def detect_apple(bgr, color="red", min_radius_px=3.0, max_radius_px=130.0, min_circularity=0.70,
                  min_aspect=0.65, max_aspect=1.5, max_outside_ratio=0.10):
     """가장 큰 색 덩어리의 (cx, cy, r) [px]. 없거나 조건에 안 맞으면 None.
     max_radius_px : 도착 거리 0.4 m(카메라→사과 0.35 m)에서 반지름 ≈ 67 px [7차 실행에서 60 으로 두어 CONFIRM 재확인 실패].
