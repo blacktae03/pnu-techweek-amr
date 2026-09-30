@@ -83,3 +83,14 @@ class GridPlanner:
 
     def give_up_goal(self, goal_xy):
         self.blacklist.append(tuple(goal_xy))
+
+    def mark_obstacle(self, x, y, radius_m=0.15):
+        """지도에 벽을 강제로 찍는다. LiDAR 가 못 보는 낮은 물체(공, 사과, 고양이)에 걸렸을 때 그 자리를 막아
+        A* 가 다시는 그리로 경로를 내지 않게 한다. log-odds 를 최대치로 두어 다음 스캔의 miss 로 금방 지워지지 않게."""
+        r_c = int(np.ceil(radius_m / self.spec.resolution))
+        r0, c0 = self.spec.world_to_grid(x, y)
+        rr, cc = np.ogrid[-r_c:r_c + 1, -r_c:r_c + 1]
+        disk = (rr ** 2 + cc ** 2) <= r_c ** 2
+        R = np.clip(r0 + rr, 0, self.spec.rows - 1); C = np.clip(c0 + cc, 0, self.spec.cols - 1)
+        self.grid.log_odds[R, C] = np.where(disk, self.grid.l_clamp, self.grid.log_odds[R, C])
+        self._ternary = None

@@ -36,10 +36,30 @@ def ground_truth():
     return (p[0], p[1], math.atan2(o[3], o[0]))
 
 
+def apple_positions():
+    """디버깅용: 월드의 모든 *Apple 노드의 현재 위치. 사과는 물리 객체라 굴러갈 수 있다 (월드 파일 값과 다를 수 있음)."""
+    out = []
+    root = robot.getRoot().getField("children")
+    for i in range(root.getCount()):
+        n = root.getMFNode(i)
+        try:
+            tn = n.getTypeName()
+        except Exception:
+            continue
+        if tn.endswith("Apple"):
+            p = n.getPosition()
+            out.append((tn, round(p[0], 2), round(p[1], 2), round(p[2], 2)))
+    return out
+
+
 if node is not None:
     robot.step(int(robot.getBasicTimeStep()))          # 한 스텝 진행해야 위치가 유효
     start_pose = ground_truth()
     print(f"[tb3_gridnav] 시작 pose (ground truth) = ({start_pose[0]:.2f}, {start_pose[1]:.2f}, {math.degrees(start_pose[2]):.0f}°)")
+    print("[tb3_gridnav] 사과 실제 위치(t=0):", apple_positions())
+    for _ in range(int(3.0 / (robot.getBasicTimeStep() / 1000.0))):     # 3초 동안 물리 안정화 관찰
+        robot.step(int(robot.getBasicTimeStep()))
+    print("[tb3_gridnav] 사과 실제 위치(t=3s):", apple_positions())
 else:
     start_pose = (-0.3, -7.5, math.pi)                 # apartment.wbt 기본값
     print("[tb3_gridnav] Supervisor 없음 → 시작 pose 를 상수로 사용:", start_pose)

@@ -43,6 +43,12 @@ TARGET_COUNT = 1            # 이 개수를 찾으면 탐색을 멈추고 방문
 ARRIVE_DIST = ROBOT_RADIUS + 0.3   # 대상 "도착" 판정 거리 (당일 규칙 확인)
 HOME_DIST = 0.2             # 복귀 완료 판정
 HOLD_SECONDS = float(os.environ.get("GRIDNAV_HOLD", "0"))   # 테스트용: 처음 N초 정지
+# 헛바퀴(slip) 감지: 전진 명령 중인데 스캔이 1초 전과 거의 같으면 로봇은 안 움직인 것 (낮은 물체에 걸림)
+SLIP_WINDOW_S = 1.0         # 비교할 과거 스캔의 시간 차
+SLIP_SCAN_CHANGE_M = 0.04   # 이보다 스캔 변화가 작으면 '정지' (0.15 m/s × 1 s = 0.15 m 변해야 정상)
+SLIP_CONFIRM_S = 1.0        # 이 시간 연속 정지 판정이면 걸린 것으로 확정
+RECOVER_BACK_S = 3.0        # 복구: 후진 시간 (0.1 m/s → 0.3 m)
+OBSTACLE_AHEAD_M = 0.25     # 복구 시 로봇 앞 이 거리에 장애물을 찍음
 
 
 # ======================================================================
@@ -156,6 +162,8 @@ def run(robot, start_pose, ground_truth=None, map_save_path="map.npy", map_save_
     goal: Optional[Tuple[float, float]] = None
     visited: List[Tuple[float, float]] = []
     angles = None; last_scan = None; scan_count = 0; no_frontier_count = 0
+    scan_hist: List[Tuple[float, np.ndarray]] = []     # (t, ranges) 최근 스캔들 (slip 감지용)
+    slip_time = 0.0; slip_pose_ref = None; recover_until = -1e9; slip_events = 0; slip_goal_count = {}
     last_plan_t = last_save = last_log = last_disp = -1e9
     v = w = 0.0
 
@@ -172,6 +180,35 @@ def run(robot, start_pose, ground_truth=None, map_save_path="map.npy", map_save_
                                 gyro_z=gyro.getValues()[2], dt=dt,
                                 ranges=ranges if valid_scan else None, angles=angles, log_odds=planner.grid.log_odds)
 
+        # (1b) 헛바퀴 감지  [integration]: 전진 중인데 환경(스캔)이 안 변하면 로봇은 제자리 → odometry 증가분 취소
+        if valid_scan:
+            scan_hist.append((t, ranges)); scan_hist = [(ts, r) for ts, r in scan_hist if t - ts <= SLIP_WINDOW_S + 0.2]
+        moving_cmd = abs(motion.v_cmd) > 0.05 and abs(motion.w_cmd) < 0.4
+        if moving_cmd and len(scan_hist) >= 2 and t - scan_hist[0][0] >= SLIP_WINDOW_S * 0.8 and t >= recover_until:
+            old = scan_hist[0][1]
+            both = np.isfinite(ranges) & np.isfinite(old)
+            change = float(np.median(np.abs(ranges[both] - old[both]))) if both.sum() > 30 else np.inf
+            if change < SLIP_SCAN_CHANGE_M:
+                if slip_pose_ref is None:
+                    slip_pose_ref = pose
+                slip_time += dt
+                if slip_time > 0.3:                      # 헛바퀴로 보이는 동안 pose 를 고정 (가짜 전진 취소)
+                    estimator.odom.set_pose(slip_pose_ref); pose = slip_pose_ref
+            else:
+                slip_time = 0.0; slip_pose_ref = None
+        else:
+            slip_time = 0.0; slip_pose_ref = None
+        if slip_time > SLIP_CONFIRM_S:
+            slip_events += 1
+            ox = pose[0] + OBSTACLE_AHEAD_M * math.cos(pose[2]); oy = pose[1] + OBSTACLE_AHEAD_M * math.sin(pose[2])
+            planner.mark_obstacle(ox, oy, 0.15)
+            key = None if goal is None else (round(goal[0], 1), round(goal[1], 1))
+            slip_goal_count[key] = slip_goal_count.get(key, 0) + 1
+            if goal is not None and slip_goal_count[key] >= 2:
+                planner.give_up_goal(goal); print(f"[{t:.1f}s] 같은 목표에서 2번 걸림 → 목표 포기 {key}")
+            print(f"[{t:.1f}s] !! 헛바퀴 감지 ({slip_events}회): 앞 {OBSTACLE_AHEAD_M} m 에 장애물 표시, {RECOVER_BACK_S} s 후진 후 재계획")
+            recover_until = t + RECOVER_BACK_S; slip_time = 0.0; slip_pose_ref = None; path = None
+
         # (2) 지도 갱신  [feat/exploration]  (새 스캔일 때만. LiDAR 100 ms 주기)
         if new_scan:
             if valid_scan:
@@ -183,7 +220,7 @@ def run(robot, start_pose, ground_truth=None, map_save_path="map.npy", map_save_
         found_targets = detector.targets
 
         # (4) 미션 상태 기계 + 경로 계획  [integration]  (스캔 3개 쌓인 뒤, 1 s 주기)
-        if scan_count >= 3 and (path is None or t - last_plan_t > REPLAN_PERIOD_S):
+        if scan_count >= 3 and t >= recover_until and (path is None or t - last_plan_t > REPLAN_PERIOD_S):
             last_plan_t = t
             if state == "EXPLORE" and len(found_targets) >= TARGET_COUNT:
                 state = "VISIT"; print(f"[{t:.1f}s] 대상 {len(found_targets)}개 확보 → 탐색 중단, VISIT")
@@ -215,6 +252,9 @@ def run(robot, start_pose, ground_truth=None, map_save_path="map.npy", map_save_
 
         # (5) 속도 명령  [feat/dwa]   (환경변수 GRIDNAV_HOLD=초 를 주면 그동안 정지: 비전 테스트용)
         v, w = motion.command(pose, path, ranges, angles, state)
+        if t < recover_until:                        # 복구 중: 후진
+            v, w = -0.10, 0.0
+            motion.v_cmd, motion.w_cmd = v, w
         if t < HOLD_SECONDS:
             v, w = 0.0, 0.0
         wl, wr = to_wheel_speeds(v, w)
@@ -240,7 +280,7 @@ def run(robot, start_pose, ground_truth=None, map_save_path="map.npy", map_save_
             err = f" 위치오차={math.hypot(pose[0] - gt[0], pose[1] - gt[1]):.2f}m" if gt else ""
             print(f"[{t:6.1f}s] {state:8s} pose=({pose[0]:.2f},{pose[1]:.2f},{math.degrees(pose[2]):.0f}°){err} "
                   f"목표={None if goal is None else (round(goal[0], 2), round(goal[1], 2))} 경로점={0 if not path else len(path)} "
-                  f"v={v:.2f} w={w:+.2f} 대상={len(found_targets)} 비전거부={detector.rejected} 지도밖hit={planner.grid.dropped_hits}")
+                  f"v={v:.2f} w={w:+.2f} 대상={len(found_targets)} 헛바퀴={slip_events} 비전거부={detector.rejected} 지도밖hit={planner.grid.dropped_hits}")
 
 
 if __name__ == "__main__":
