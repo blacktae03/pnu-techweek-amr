@@ -232,6 +232,7 @@ class CorrelativeMatcher:
     파라미터 감:
       search_xy / step_xy : 스캔 간 odometry 가 틀릴 수 있는 최대 거리. 0.1 s 마다 보정하면 ±0.1 m 로 충분.
       search_th / step_th : 회전 오차 허용. ±3° 정도.
+                            컴퍼스 절대각을 쓰는 PoseEstimator에서는 search_th=0으로 고정한다.
       sigma_cells         : 흐림 정도. 1~1.5 칸.
       min_score           : 이보다 점수(평균 가능도)가 낮으면 '지도와 안 맞음' → 보정 거부.
     """
@@ -277,12 +278,18 @@ class CorrelativeMatcher:
         if self.calls % self.every_n != 0:
             return pose_pred
         arr = np.asarray(ternary)
+        if arr.shape != self.spec.shape or not np.isfinite(pose_pred).all():
+            return pose_pred
         n_wall = int((arr > self.l_static).sum() if arr.dtype.kind == "f" else (arr == 1).sum())
         if n_wall < self.min_map_points:
             return pose_pred
-        angles = np.asarray(angles)[::self.beam_stride]
-        ranges = np.asarray(ranges, dtype=float)[::self.beam_stride]
-        ok = np.isfinite(ranges) & (ranges > 0.05) & (ranges < self.max_range)
+        angles = np.asarray(angles, dtype=float)
+        ranges = np.asarray(ranges, dtype=float)
+        if angles.ndim != 1 or ranges.shape != angles.shape:
+            return pose_pred
+        angles = angles[::self.beam_stride]
+        ranges = ranges[::self.beam_stride]
+        ok = np.isfinite(angles) & np.isfinite(ranges) & (ranges > 0.05) & (ranges < self.max_range)
         if ok.sum() < 30:
             return pose_pred
         lf = self.likelihood_field(ternary)

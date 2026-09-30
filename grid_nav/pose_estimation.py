@@ -1,9 +1,9 @@
 """
 pose_estimation.py - 로봇 위치 추정 (브랜치 feat/localization 소유)
 
-지금: 바퀴 엔코더 odometry + 컴퍼스 절대 heading.  (apartment 에서 진짜 위치 대비 오차 0.02~0.12 m)
-다음: PoseEstimator.update() 안에 localization.CorrelativeMatcher 를 끼워 LiDAR 로 보정.
-      (예측 → 보정 → 지도 갱신 순서를 지킬 것. 지도(log_odds)는 인자로 받는다)
+바퀴 엔코더 odometry + 컴퍼스 절대 heading + 선택적 CorrelativeMatcher 위치 보정.
+webots_adapter.run(..., use_scan_matching=True)로 활성화한다. 기본 OFF는 유지한다.
+예측 → 보정 → 지도 갱신 순서이며, 인자로 받은 지도는 이전 스캔까지의 지도여야 한다.
 
 인터페이스 (webots_adapter.run 이 부름):
     est = PoseEstimator(start_pose)
@@ -89,17 +89,20 @@ class PoseEstimator:
         self.matcher = None
         if use_scan_matching and spec is not None:
             from localization import CorrelativeMatcher
-            self.matcher = CorrelativeMatcher(spec)
+            # 보정 후 컴퍼스 각도를 복원하는 것만으로는 충분하지 않다.
+            # 후보 탐색 자체도 같은 각도로 해야 회전 오차를 x/y 이동으로 보상하지 않는다.
+            self.matcher = CorrelativeMatcher(spec, search_th=0.0)
         self.corrections = 0
 
     def update(self, phi_l, phi_r, compass_values, gyro_z=None, dt=None,
                ranges=None, angles=None, log_odds=None):
         theta = self.heading.update(compass_values)
         pose = self.odom.update(phi_l, phi_r, theta_external=theta, gyro_z=gyro_z, dt=dt)
-        # --- feat/localization: 여기서 scan matching 보정 ---
-        if self.matcher is not None and ranges is not None and log_odds is not None:
+        # 지도 갱신은 adapter가 이 호출 이후에 수행한다. 여기서는 읽기만 한다.
+        if (self.matcher is not None and ranges is not None
+                and angles is not None and log_odds is not None):
             corrected = self.matcher.correct(pose, angles, ranges, log_odds)
-            if corrected != pose:
+            if corrected[:2] != pose[:2]:
                 self.corrections += 1
                 # 위치만 보정하고 heading 은 컴퍼스를 믿는다 (컴퍼스가 절대각이라 더 정확)
                 self.odom.set_pose((corrected[0], corrected[1], pose[2]))
