@@ -28,6 +28,12 @@ MERGE_RADIUS = 1.0          # 이 반경 안의 재탐지는 같은 대상으로
 HORIZON_MARGIN_PX = 6       # 사과 중심은 화면 수평선(H/2) 보다 이만큼 아래여야 함 (바닥 물체 조건)
 CONSISTENCY_RATIO = 2.0     # 반지름 거리 / 세로위치 거리 비율이 [1/R, R] 안이어야 채택
 CONFIRM_FRAMES = 2          # 연속 프레임 수 이상 보여야 확정 (한 프레임 노이즈 배제)
+# 비(非)대상 사과 = 장애물. 사과(지름 10 cm, 중심 5 cm)는 LiDAR 평면(17 cm) 아래라 지도에 안 찍혀 로봇이 치고 지나간다
+# (B조 실행: 보라 사과 충돌). 같은 색·원형도 검사로 찾아 지도에 장애물로 등록한다. 빨간 사과 판정 로직은 건드리지 않는다.
+OBSTACLE_COLORS = ("green", "orange", "purple")
+OBSTACLE_EVERY = 2          # 대상 색 처리(VISION_EVERY) 몇 번마다 한 번 장애물 색을 처리 (비용 절감)
+OBSTACLE_MERGE_RADIUS = 0.5 # 이 반경 안의 재탐지는 같은 장애물
+OBSTACLE_MAX_DIST = 2.5     # 이보다 먼 추정은 장애물 등록 안 함 (위치 오차 큼)
 
 
 def target_world_from_pixel(pose, cx_px, radius_px, cam_w=CAM_W, fov=CAM_FOV,
@@ -79,6 +85,10 @@ class TargetDetector:
         self.consecutive = 0
         self.rejected = {"horizon": 0, "inconsistent": 0, "far": 0}
         self.n_snapshots = 0
+        self.obstacles: List[Tuple[float, float, str]] = []   # 확정된 비대상 사과 (x, y, color)
+        self._obs_consec = {c: 0 for c in OBSTACLE_COLORS}
+        self._obs_frames = 0
+        self.obstacle_ms = None                                # 장애물 색 처리 1회 비용 [ms] (진단)
 
     def process(self, image_bytes, pose, t) -> Optional[Tuple[float, float]]:
         self.step_i += 1
@@ -118,6 +128,9 @@ class TargetDetector:
                         self.targets[idx] = (tx, ty); self._best_dist[idx] = dist
         if not accepted:
             self.consecutive = 0
+        self._obs_frames += 1
+        if self._obs_frames % OBSTACLE_EVERY == 0:
+            self._detect_obstacle_apples(bgr, pose, t)
         if self.debug_dir and t - self.last_cam_save >= 0.5:
             self.last_cam_save = t
             vision.save_debug_frame(vision.draw_detection(bgr, det, self.color), os.path.join(self.debug_dir, "cam.jpg"))
@@ -128,3 +141,31 @@ class TargetDetector:
             self.n_snapshots += 1
             vision.save_debug_frame(vision.draw_detection(bgr, det, self.color),
                                     os.path.join(self.debug_dir, f"det_{self.n_snapshots}.jpg"))
+
+    def _detect_obstacle_apples(self, bgr, pose, t):
+        """빨강이 아닌 사과(초록·주황·보라) 를 같은 기하 규칙(수평선 아래, 두 거리 추정 일치, 2프레임) 으로 찾아
+        self.obstacles 에 기록. 어댑터가 이를 지도 장애물(mark_obstacle)로 찍는다. 대상 색 판정과는 완전히 분리."""
+        import time as _time
+        t0 = _time.perf_counter()
+        for color in OBSTACLE_COLORS:
+            det = vision.detect_apple(bgr, color, MIN_APPLE_RADIUS_PX)
+            ok = False
+            if det is not None:
+                cx, cy, r = det
+                (_, _), bearing, d_r = target_world_from_pixel(pose, cx, r, self.cam_w, self.cam_fov)
+                d_row = distance_from_row(cy, self.cam_h, self.cam_w, self.cam_fov)
+                if (cy >= self.cam_h / 2 + HORIZON_MARGIN_PX and 1.0 / CONSISTENCY_RATIO < d_r / d_row < CONSISTENCY_RATIO
+                        and d_r <= OBSTACLE_MAX_DIST):
+                    ok = True
+                    self._obs_consec[color] += 1
+                    if self._obs_consec[color] >= CONFIRM_FRAMES:
+                        dist = math.sqrt(d_r * d_row)
+                        x = pose[0] + dist * math.cos(pose[2] + bearing); y = pose[1] + dist * math.sin(pose[2] + bearing)
+                        if all(math.hypot(x - ox, y - oy) >= OBSTACLE_MERGE_RADIUS for ox, oy, _ in self.obstacles) \
+                                and all(math.hypot(x - tx, y - ty) >= OBSTACLE_MERGE_RADIUS for tx, ty in self.targets):
+                            self.obstacles.append((x, y, color))
+                            print(f"[{t:.1f}s] ○ {color} 사과(장애물) 확정: r={r:.1f}px 거리 {dist:.2f} m → 월드 ({x:.2f}, {y:.2f})  (장애물 {len(self.obstacles)}개)")
+            if not ok:
+                self._obs_consec[color] = 0
+        self.obstacle_ms = (_time.perf_counter() - t0) * 1000.0
+
