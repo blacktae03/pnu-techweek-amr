@@ -246,6 +246,22 @@ def run(robot, start_pose, ground_truth=None, map_save_path="map.npy", map_save_
     search_done = 0
     marked_obstacles = 0                 # detector.obstacles 중 지도에 찍은 개수
     spin_until = -1e9; last_spin = -1e9; prev_goal = None; lookarounds = 0
+    trail: List[Tuple[float, float, float]] = []   # (t, x, y) 최근 10 s 궤적 — 후진 허용 판정용
+    unsafe_backs = 0
+
+    def back_is_safe(pose_):
+        """로봇 뒤 0.5 m 구간이 카메라로 본 곳이거나 직전 10 s 에 지나온 궤적 위일 때만 후진 허용.
+        1차 실행: LiDAR 가 못 보는 낮은 물체(사과) 쪽으로 물러날 위험. 아니면 제자리 회전으로 대체."""
+        for frac in (0.25, 0.5):
+            bx = pose_[0] - frac * math.cos(pose_[2]); by = pose_[1] - frac * math.sin(pose_[2])
+            r_, c_ = planner.spec.world_to_grid(bx, by)
+            if not planner.spec.in_bounds(r_, c_):
+                return False
+            seen_ok = bool(planner.seen[int(r_), int(c_)])
+            trail_ok = any(math.hypot(bx - tx, by - ty) < 0.25 for _, tx, ty in trail)
+            if not (seen_ok or trail_ok):
+                return False
+        return True
     v = w = 0.0
     last_scan_t = -np.inf
     progress_since = None; progress_xy = None
@@ -286,6 +302,7 @@ def run(robot, start_pose, ground_truth=None, map_save_path="map.npy", map_save_
         # (1b) 헛바퀴 감지  [integration]: 전진 중인데 환경(스캔)이 안 변하면 로봇은 제자리 → odometry 증가분 취소
         if valid_scan:
             scan_hist.append((t, ranges)); scan_hist = [(ts, r) for ts, r in scan_hist if t - ts <= SLIP_WINDOW_S + 0.2]
+        trail.append((t, pose[0], pose[1])); trail = [p_ for p_ in trail if t - p_[0] <= 10.0]
         moving_cmd = abs(motion.v_cmd) > 0.05 and abs(motion.w_cmd) < 0.4
         if moving_cmd and state not in ("CONFIRM", "DONE", "BLOCKED") and t >= recover_until:
             if progress_xy is None or math.dist(pose[:2], progress_xy) > 0.08:
@@ -470,9 +487,11 @@ def run(robot, start_pose, ground_truth=None, map_save_path="map.npy", map_save_
                 # 이미 관측한 낮은 사과도 이후 궤적에서 장애물로 기억한다.
                 # 사과 반경뿐 아니라 위치 추정 오차도 포함해 출발 시 재접근을 막는다.
                 motion.remember_obstacle(*target, radius=0.18)
+                planner.mark_obstacle(target[0], target[1], 0.20)      # 방문한 사과도 낮은 장애물: 이후 경로에서 회피 (고정 표시)
                 goal = None; path = None; no_frontier_count = 0
 
         # (5) 속도 명령  [feat/dwa]   (환경변수 GRIDNAV_HOLD=초 를 주면 그동안 정지: 비전 테스트용)
+        motion.params.v_min = -0.15 if back_is_safe(pose) else 0.0     # DWA 후진 후보도 뒤가 안전할 때만
         v, w = motion.command(pose, path, ranges, angles, state)
         if state == "APPROACH" and path:
             # 사과는 흔히 벽에서 0.1 m 에 있어 DWA 여유(정적 0.205 / 동적 0.305 m) 안이다 → 최종 0.35 m 접근은
@@ -496,8 +515,11 @@ def run(robot, start_pose, ground_truth=None, map_save_path="map.npy", map_save_
                 vision.save_debug_frame(vision.draw_detection(bgr, detector.last_det, "confirmed"),
                                         os.path.join(debug_dir or ".", "confirmed.jpg"))
                 print(f"[{t:.1f}s] 카메라로 대상 재확인 (r={detector.last_det[2]:.0f}px) → confirmed.jpg 저장")
-        if t < recover_until:                        # 복구 중: 후진
-            v, w = -0.10, 0.0
+        if t < recover_until:                        # 복구 중: 후진 (뒤가 '본 곳/지나온 곳' 일 때만, 아니면 제자리 회전)
+            if back_is_safe(pose):
+                v, w = -0.10, 0.0
+            else:
+                v, w = 0.0, 0.8; unsafe_backs += 1
         if state == "EXPLORE" and goal is None and no_frontier_count > 0:
             v, w = 0.0, 0.5
         if state in ("DONE", "BLOCKED"):
@@ -538,7 +560,7 @@ def run(robot, start_pose, ground_truth=None, map_save_path="map.npy", map_save_
             err = f" 위치오차={math.hypot(pose[0] - gt[0], pose[1] - gt[1]):.2f}m" if gt else ""
             print(f"[{t:6.1f}s] {state:8s} pose=({pose[0]:.2f},{pose[1]:.2f},{math.degrees(pose[2]):.0f}°){err} "
                   f"목표={None if goal is None else (round(goal[0], 2), round(goal[1], 2))} 경로점={0 if not path else len(path)} "
-                  f"v={v:.2f} w={w:+.2f} 대상={len(found_targets)} 방문={len(visits.completed)}/{TARGET_COUNT} 헛바퀴={slip_events} 미확인칸={planner.unseen_cells} 둘러보기={lookarounds} DWA복구={motion.recoveries} 비상정지={motion.emergency_stops} 사과장애물={len(detector.obstacles)} 정적/동적점={len(motion._cached_obstacles[0])}/{len(motion._cached_obstacles[1])} 보정={estimator.corrections} 비바닥접촉={contact_events if contact_node else '미계측'} 비전거부={detector.rejected} 지도밖hit={planner.grid.dropped_hits}")
+                  f"v={v:.2f} w={w:+.2f} 대상={len(found_targets)} 방문={len(visits.completed)}/{TARGET_COUNT} 헛바퀴={slip_events} 미확인칸={planner.unseen_cells} 둘러보기={lookarounds} DWA복구={motion.recoveries} 비상정지={motion.emergency_stops} 사과장애물={len(detector.obstacles)} 후진거부={unsafe_backs} 정적/동적점={len(motion._cached_obstacles[0])}/{len(motion._cached_obstacles[1])} 보정={estimator.corrections} 비바닥접촉={contact_events if contact_node else '미계측'} 비전거부={detector.rejected} 지도밖hit={planner.grid.dropped_hits}")
 
 
 if __name__ == "__main__":

@@ -31,7 +31,9 @@ CONFIRM_FRAMES = 2          # 연속 프레임 수 이상 보여야 확정 (한 
 # 비(非)대상 사과 = 장애물. 사과(지름 10 cm, 중심 5 cm)는 LiDAR 평면(17 cm) 아래라 지도에 안 찍혀 로봇이 치고 지나간다
 # (B조 실행: 보라 사과 충돌). 같은 색·원형도 검사로 찾아 지도에 장애물로 등록한다. 빨간 사과 판정 로직은 건드리지 않는다.
 OBSTACLE_COLORS = ("green", "orange", "purple")
-OBSTACLE_EVERY = 2          # 대상 색 처리(VISION_EVERY) 몇 번마다 한 번 장애물 색을 처리 (비용 절감)
+OBSTACLE_EVERY = 1          # 대상 색 처리(VISION_EVERY) 마다 장애물 색도 처리 (3색 ≈ 3 ms)
+OBSTACLE_CONFIRM_FRAMES = 1 # 비대상 사과는 1프레임 즉시 등록 (오등록은 통행 비용만 늘 뿐, 놓치면 충돌)
+OBSTACLE_MIN_RADIUS = 0.20  # 등록 반경 하한
 OBSTACLE_MERGE_RADIUS = 0.8 # 이 반경 안의 재탐지는 같은 장애물 (더 가까이서 보면 위치 갱신; 1차 실행 1.7 m 추정이 0.54 m 어긋남)
 OBSTACLE_MAX_DIST = 2.0     # 이보다 먼 추정은 장애물 등록 안 함. 멀수록 반경을 키워(obstacle_radius) 오차를 덮는다
                             # (1차 실행: 2.2~2.4 m 추정이 진실값과 0.85 m, 1.7 m 는 0.54 m, 1.4 m 는 0.2 m, 0.45 m 는 0.02 m 어긋남)
@@ -148,7 +150,7 @@ class TargetDetector:
     @staticmethod
     def obstacle_radius(dist):
         """지도에 찍을 장애물 반경: 사과 반지름 0.05 + 여유 0.10 + 거리 비례 위치 불확실성(1차 실행 실측 ≈ 0.3·거리)."""
-        return 0.15 + 0.25 * max(0.0, dist - 0.5)
+        return max(OBSTACLE_MIN_RADIUS, 0.15 + 0.25 * max(0.0, dist - 0.5))
 
     def _detect_obstacle_apples(self, bgr, pose, t):
         """빨강이 아닌 사과(초록·주황·보라) 를 같은 기하 규칙(수평선 아래, 두 거리 추정 일치, 2프레임) 으로 찾아
@@ -166,7 +168,7 @@ class TargetDetector:
                         and d_r <= OBSTACLE_MAX_DIST):
                     ok = True
                     self._obs_consec[color] += 1
-                    if self._obs_consec[color] >= CONFIRM_FRAMES:
+                    if self._obs_consec[color] >= OBSTACLE_CONFIRM_FRAMES:
                         dist = math.sqrt(d_r * d_row)
                         x = pose[0] + dist * math.cos(pose[2] + bearing); y = pose[1] + dist * math.sin(pose[2] + bearing)
                         if all(math.hypot(x - tx, y - ty) >= OBSTACLE_MERGE_RADIUS for tx, ty in self.targets):
@@ -177,7 +179,7 @@ class TargetDetector:
                                 print(f"[{t:.1f}s] ○ {color} 사과(장애물) 확정: r={r:.1f}px 거리 {dist:.2f} m → 월드 ({x:.2f}, {y:.2f}) "
                                       f"반경 {self.obstacle_radius(dist):.2f} m  (장애물 {len(self.obstacles)}개)")
                                 self.obstacle_updates.append((idx, x, y, self.obstacle_radius(dist)))
-                            elif dist < self._obs_dist[idx] - 0.3:      # 훨씬 가까이서 다시 봄 → 정확한 위치로 갱신
+                            elif dist < self._obs_dist[idx] - 0.2 and dist <= 2.0:   # 더 가까이서 다시 봄 → 위치 갱신
                                 self.obstacles[idx] = (x, y, color); self._obs_dist[idx] = dist
                                 self.obstacle_updates.append((idx, x, y, self.obstacle_radius(dist)))
             if not ok:
