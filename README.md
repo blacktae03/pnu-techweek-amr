@@ -177,10 +177,17 @@ Webots Preferences > General > Python command 에 위 패키지가 설치된 파
 
 ## 9. 팀 역할과 브랜치
 
-| 담당 | 파일 | 브랜치 (모두 main 병합) |
-|---|---|---|
-| A조 | 지도·frontier·A*·비전·상태 기계·통합·문서 | feat/vision (PR #1), feat/exploration (PR #2), fix/integration (PR #5) |
-| B조 | 위치 추정·DWA·watchdog·2사과 미션 테스트 | feat/localization (PR #3), feat/dwa (PR #4), c54afcb 직접 푸시 |
+| 조 | GitHub | 역할 | 파일 |
+|---|---|---|---|
+| A조 | [@blacktae03](https://github.com/blacktae03) | 점유 격자·frontier 탐색·A*, 사과 탐지(비전), 상태 기계, **전체 통합**, 문서·발표 | grid_nav/occupancy_grid.py, frontier.py, astar.py, exploration.py, vision.py, target_detection.py, webots_adapter.py, controllers/tb3_gridnav |
+| A조 | [@ziuneeeeeee](https://github.com/ziuneeeeeee) | 탐색·비전 파트 공동 개발, 실행 검증 | (A조 공동) |
+| B조 | [@mongdmin](https://github.com/mongdmin) | 위치 추정(오도메트리·나침반·스캔 매칭), DWA 국소 계획 | grid_nav/pose_estimation.py, localization.py, motion_control.py, dwa.py |
+| B조 | [@badyeun](https://github.com/badyeun) | 위치 추정·DWA 공동 개발, 2사과 미션 로직·watchdog, 테스트 | (B조 공동), tests/test_two_apple_mission.py |
+
+| 조 | 브랜치 (모두 main 병합) |
+|---|---|
+| A조 | feat/vision (PR #1), feat/exploration (PR #2), fix/integration (PR #5), docs/readme |
+| B조 | feat/localization (PR #3), feat/dwa (PR #4), c54afcb 직접 푸시 |
 
 규칙: main은 PR로만, PR 설명에 판정 수치(발견 시각·좌표 오차·복귀 오차·충돌). 상세는 `docs/BRANCHES.md`.
 
