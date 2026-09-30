@@ -64,16 +64,27 @@ class DWAParams:
     w_clearance: float = 1.2
     w_velocity: float = 0.3
     w_reverse: float = 0.5       # 후진 후보에 추가 벌점 (필요할 때만 후진)
+    wheel_v_max: float = np.inf  # 바퀴 선속도 한계 [m/s]. 유한하면 실행 가능한 후보만 평가
+    wheel_separation: float = 0.160
+    control_dt: float | None = None  # 실제 명령 주기. None이면 기존 dt 사용; dt는 궤적 적분 간격
 
 
 def dynamic_window(v_cur, w_cur, p: DWAParams):
     """지금 속도에서 dt 안에 도달 가능한 (v, ω) 후보 격자."""
-    v_lo = max(p.v_min, v_cur - p.a_v * p.dt)
-    v_hi = min(p.v_max, v_cur + p.a_v * p.dt)
-    w_lo = max(-p.w_max, w_cur - p.a_w * p.dt)
-    w_hi = min(p.w_max, w_cur + p.a_w * p.dt)
+    control_dt = p.dt if p.control_dt is None else p.control_dt
+    if not np.isfinite(control_dt) or control_dt <= 0:
+        raise ValueError("control_dt must be positive and finite")
+    v_lo = max(p.v_min, v_cur - p.a_v * control_dt)
+    v_hi = min(p.v_max, v_cur + p.a_v * control_dt)
+    w_lo = max(-p.w_max, w_cur - p.a_w * control_dt)
+    w_hi = min(p.w_max, w_cur + p.a_w * control_dt)
     vs = np.linspace(v_lo, v_hi, p.n_v)
     ws = np.linspace(w_lo, w_hi, p.n_w)
+    # 균등 격자가 0을 놓쳐도 정지/직진을 선택할 수 있게 한다 (후보 수 유지).
+    if v_lo <= 0.0 <= v_hi:
+        vs[np.argmin(np.abs(vs))] = 0.0
+    if w_lo <= 0.0 <= w_hi:
+        ws[np.argmin(np.abs(ws))] = 0.0
     V, W = np.meshgrid(vs, ws, indexing="ij")
     return V.ravel(), W.ravel()                     # (K,), (K,)
 
@@ -97,7 +108,8 @@ def dwa_control(pose, v_cur, w_cur, goal_xy, obstacles_xy, p: DWAParams = DWAPar
     obstacles_xy : 정적으로 봐도 되는 점 (지도에서 여러 번 확인된 벽)
     dynamic_xy   : 움직일 수 있는 점 (지도에 아직 굳지 않은 것 = 사람일 가능성). dyn_margin 만큼 더 멀리 피함.
                    DWA 는 장애물 속도를 모르므로, '모르는 것은 더 멀리' 가 가장 단순하고 효과적인 대응.
-    모든 후보가 충돌이면 장애물에서 가장 멀어지는 궤적(보통 후진) 을 택한다."""
+    모든 후보가 여유 거리 기준을 위반하면 몸체 충돌이 없는 복구 궤적(보통 후진)을
+    택한다. 복구 궤적도 없으면 정지한다."""
     V, W = dynamic_window(v_cur, w_cur, p)
     traj = simulate_trajectories(pose, V, W, p)                    # (K, T, 3)
     K, T, _ = traj.shape
@@ -110,10 +122,12 @@ def dwa_control(pose, v_cur, w_cur, goal_xy, obstacles_xy, p: DWAParams = DWAPar
         clearance = d.reshape(K, T).min(axis=1)                    # (K,)
     else:
         clearance = np.full(K, np.inf)
+    physical_clearance = clearance.copy()
     if dynamic_xy is not None and len(dynamic_xy) > 0:
         dtree = cKDTree(np.asarray(dynamic_xy, dtype=float).reshape(-1, 2))
         dd, _ = dtree.query(traj[..., :2].reshape(-1, 2))
         clear_dyn = dd.reshape(K, T).min(axis=1)
+        physical_clearance = np.minimum(physical_clearance, clear_dyn)
         # 동적 점은 여유(dyn_margin - safety_margin) 를 뺀 '유효 거리' 로 환산해 정적 점과 같은 잣대로 비교
         clearance = np.minimum(clearance, clear_dyn - (p.dyn_margin - p.safety_margin))
     # 정지거리 v²/(2a) 만큼 여유를 더 둠: 빨리 갈수록 더 멀리서 멈춰야 한다
@@ -134,18 +148,27 @@ def dwa_control(pose, v_cur, w_cur, goal_xy, obstacles_xy, p: DWAParams = DWAPar
 
     cost = (p.w_heading * c_heading + p.w_dist * c_dist
             + p.w_clearance * c_clear + p.w_velocity * c_vel + p.w_reverse * c_rev)
-    cost[collide] = np.inf
+    # v와 w가 각자 한계 안이어도 바깥 바퀴는 모터 한계를 넘을 수 있다.
+    # adapter에서 나중에 축소하면 평가한 궤적과 달라지므로 여기서 제외한다.
+    reachable = np.abs(V) + np.abs(W) * p.wheel_separation / 2.0 <= p.wheel_v_max
+    cost[collide | ~reachable] = np.inf
 
     if not np.isfinite(cost).any():
         # 전부 충돌: 복구 행동 = 장애물에서 가장 멀어지는 궤적 (보통 후진 또는 제자리 회전)
-        best = int(np.argmax(clearance))
-        cmd = (float(V[best]), float(W[best]))
+        # 여유 거리 안에 들어왔어도 몸체 충돌이 예측되는 궤적은 복구용으로 쓰지 않는다.
+        recoverable = reachable & (physical_clearance >= p.robot_radius + 0.02 + brake)
+        if recoverable.any():
+            best = int(np.argmax(np.where(recoverable, clearance, -np.inf)))
+            cmd = (float(V[best]), float(W[best]))
+        else:
+            cmd = (0.0, 0.0)
         best = None
     else:
         best = int(np.argmin(cost))
         cmd = (float(V[best]), float(W[best]))
     if return_debug:
-        return cmd, dict(traj=traj, cost=cost, best=best, collide=collide, clearance=clearance)
+        return cmd, dict(traj=traj, cost=cost, best=best, collide=collide,
+                         reachable=reachable, clearance=clearance)
     return cmd
 
 
