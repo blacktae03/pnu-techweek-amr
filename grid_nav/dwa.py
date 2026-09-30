@@ -157,6 +157,16 @@ def dwa_control(pose, v_cur, w_cur, goal_xy, obstacles_xy, p: DWAParams = DWAPar
         # 전부 충돌: 복구 행동 = 장애물에서 가장 멀어지는 궤적 (보통 후진 또는 제자리 회전)
         # 여유 거리 안에 들어왔어도 몸체 충돌이 예측되는 궤적은 복구용으로 쓰지 않는다.
         recoverable = reachable & (physical_clearance >= p.robot_radius + 0.02 + brake)
+        # 여유를 줄이는 비상 후보는 장애물에서 실제로 멀어지는 경우에만 허용한다.
+        # 가까운 벽/사과 쪽으로 더 파고드는 '복구'를 선택하지 않는다.
+        all_obs = obs
+        if dynamic_xy is not None and len(dynamic_xy):
+            all_obs = np.vstack((obs, np.asarray(dynamic_xy).reshape(-1, 2)))
+        if len(all_obs):
+            escape_tree = cKDTree(all_obs)
+            initial, _ = escape_tree.query(np.asarray(pose[:2]))
+            final, _ = escape_tree.query(traj[:, -1, :2])
+            recoverable &= (physical_clearance >= initial - 0.002) & (final > initial + 0.005)
         if recoverable.any():
             best = int(np.argmax(np.where(recoverable, clearance, -np.inf)))
             cmd = (float(V[best]), float(W[best]))

@@ -81,6 +81,25 @@ class MotionController:
         self._last_scan_time = None
         self._last_scan_received = None
         self._cached_obstacles = (np.empty((0, 2)), np.empty((0, 2)))
+        self._virtual_obstacles = []
+
+    def remember_obstacle(self, x, y, radius=0.15):
+        """헛바퀴로 확인한 LiDAR 아래 장애물도 국소 궤적에서 피한다. GT 미사용."""
+        if not np.isfinite([x, y, radius]).all() or radius <= 0:
+            raise ValueError("invalid obstacle")
+        if not any(math.hypot(x - a, y - b) < radius / 2 for a, b, _ in self._virtual_obstacles):
+            self._virtual_obstacles.append((x, y, radius))
+
+    def _remembered_points(self, pose):
+        points = []
+        for x, y, radius in self._virtual_obstacles:
+            if math.hypot(x - pose[0], y - pose[1]) < LIDAR_MAX_RANGE:
+                # 원 내부도 채워서 시작 pose/궤적이 원 안에 들어가 안전하다고 오판하지 않는다.
+                xx, yy = np.meshgrid(np.arange(-radius, radius + .025, .025),
+                                     np.arange(-radius, radius + .025, .025))
+                keep = xx ** 2 + yy ** 2 <= radius ** 2
+                points.append(np.column_stack((x + xx[keep], y + yy[keep])))
+        return np.vstack(points) if points else np.empty((0, 2))
 
     def set_timing(self, control_dt, scan_period=0.1):
         """초 단위 실제 제어/센서 주기를 지정한다. command 시그니처는 유지한다.
@@ -112,6 +131,32 @@ class MotionController:
         wl, wr = to_wheel_speeds(v, w)
         self.v_cmd = WHEEL_RADIUS * (wl + wr) / 2.0
         self.w_cmd = WHEEL_RADIUS * (wr - wl) / WHEEL_SEPARATION
+
+    def guard_command(self, v, w, ranges, angles):
+        """DWA 밖의 명령도 짧은 주행 궤적과 정지거리 검사. 후방 장애물도 포함."""
+        ranges, angles = np.asarray(ranges, float), np.asarray(angles, float)
+        if (ranges.ndim != 1 or ranges.shape != angles.shape or ranges.size == 0
+                or not np.isfinite(angles).all() or not np.isfinite([v, w]).all()):
+            return 0.0, 0.0
+        valid = (np.isfinite(ranges) & (ranges > 0)) | np.isposinf(ranges)
+        if valid.mean() < 0.9:
+            return 0.0, 0.0
+        finite = np.isfinite(ranges) & (ranges > 0) & (ranges < LIDAR_MAX_RANGE)
+        if not finite.any():
+            return float(v), float(w)
+        points = np.column_stack((ranges[finite] * np.cos(angles[finite]),
+                                  ranges[finite] * np.sin(angles[finite])))
+        horizon = self.params.control_dt + self.scan_period + abs(v) / self.params.a_v
+        ts = np.linspace(0, horizon, 20)
+        if abs(w) < 1e-6:
+            centers = np.column_stack((v * ts, np.zeros_like(ts)))
+        else:
+            centers = np.column_stack((v / w * np.sin(w * ts), v / w * (1 - np.cos(w * ts))))
+        distance = np.linalg.norm(points[:, None, :] - centers[None, :, :], axis=2)
+        if distance.min() < self.params.robot_radius + 0.02:
+            self.emergency_stops += 1
+            return 0.0, 0.0
+        return float(v), float(w)
 
     def _reset_static_evidence(self):
         """점유 log-odds 외에 위치가 일정 시간 유지됐는지도 별도로 기록한다."""
@@ -218,6 +263,7 @@ class MotionController:
             self.emergency_stops += 1
             return 0.0, 0.0
         obstacles, dynamic = self._obstacles(pose, ranges, angles)
+        obstacles = np.vstack((obstacles, self._remembered_points(pose)))
         if (self._scan_timestamp is not None and self._last_scan_received is not None
                 and self._elapsed - self._last_scan_received > max(3 * self.scan_period, 0.3)):
             self.v_cmd = self.w_cmd = 0.0

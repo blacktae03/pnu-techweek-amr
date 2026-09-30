@@ -30,7 +30,8 @@ from robot_config import (ROBOT_RADIUS, LIDAR_NAME, LIDAR_PERIOD_MS, LIDAR_MAX_R
 from pose_estimation import PoseEstimator, WheelOdometry, CompassHeading          # 재수출 (tb3_reactive 가 씀)
 from exploration import GridPlanner, REPLAN_PERIOD_S
 from astar import plan_path
-from target_detection import TargetDetector, target_world_from_pixel
+from target_detection import (TargetDetector, target_world_from_pixel, distance_from_row,
+                              CONSISTENCY_RATIO, HORIZON_MARGIN_PX, VISION_EVERY)
 import vision
 from motion_control import MotionController, lookahead_control, to_wheel_speeds
 
@@ -41,7 +42,7 @@ except ImportError:
     Robot = object                        # type: ignore
     _IN_WEBOTS = False
 
-TARGET_COUNT = 1            # 이 개수를 찾으면 탐색을 멈추고 방문 → 복귀. 당일 규칙에 맞출 것
+TARGET_COUNT = 2            # 서로 다른 대상의 재확인 + 최종 접근 성공 개수
 CONFIRM_DIST = 0.70         # 1차 정지·재확인 거리. 카메라(높이 8.8 cm, 수평)에 사과가 화면 안에 들어오는 거리 (0.4 m 이하는 화면 아래로 빠짐)
 ARRIVE_DIST = 0.35          # 최종 "도달" 판정 거리 (로봇 중심~사과). 당일 규칙에 맞출 것
 HOME_DIST = 0.2             # 복귀 완료 판정
@@ -55,6 +56,69 @@ SLIP_CONFIRM_S = 2.0        # 이 시간 연속 정지 판정이면 걸린 것�
 SLIP_SECTOR_DEG = 40        # 앞뒤 ±이 각도의 빔만 비교. 복도에서 옆 벽 빔은 직진해도 안 변하므로 제외 (4차 실행 오판 원인)
 RECOVER_BACK_S = 3.0        # 복구: 후진 시간 (0.1 m/s → 0.3 m)
 OBSTACLE_AHEAD_M = 0.25     # 복구 시 로봇 앞 이 거리에 장애물을 찍음
+
+
+class MissionVisits:
+    """Detector.targets는 append/동일 인덱스 갱신만 한다. 좌표 대신 인덱스로 방문 관리."""
+    def __init__(self, required=TARGET_COUNT):
+        self.required = required
+        self.completed = set()
+        self.retry_after = {}
+        self.active = None
+
+    @property
+    def complete(self):
+        return len(self.completed) >= self.required
+
+    def select(self, targets, pose, now):
+        remaining = [i for i in range(len(targets)) if i not in self.completed
+                     and now >= self.retry_after.get(i, -np.inf)]
+        self.active = min(remaining, key=lambda i: math.dist(pose[:2], targets[i])) if remaining else None
+        return self.active
+
+    def defer(self, now):
+        if self.active is not None:
+            self.retry_after[self.active] = now + 20.0
+        self.active = None
+
+    def finish(self, distance, confirmed):
+        if self.active is None or not confirmed or not np.isfinite(distance) or distance >= ARRIVE_DIST:
+            return False
+        self.completed.add(self.active)
+        self.active = None
+        return True
+
+
+class ProgressWatchdog:
+    """명령 속도와 무관하게 목표를 향한 주행 중 위치 정체를 감지한다."""
+    def __init__(self, timeout=15.0, distance=0.15):
+        self.timeout, self.distance = timeout, distance
+        self.anchor = None
+        self.since = None
+
+    def update(self, pose, now, navigating):
+        if not navigating:
+            self.anchor = None; self.since = None
+            return False
+        if self.anchor is None or math.dist(pose[:2], self.anchor) > self.distance:
+            self.anchor = pose[:2]; self.since = now
+            return False
+        return now - self.since >= self.timeout
+
+
+def confirms_active_target(detector, pose, target):
+    """이번에 처리한 유효 카메라 관측만 현재 방문 대상의 재확인으로 사용."""
+    if detector.step_i % VISION_EVERY or detector.consecutive < 2 or detector.last_det is None:
+        return False
+    cx, cy, radius = detector.last_det
+    _, bearing, d_radius = target_world_from_pixel(pose, cx, radius, detector.cam_w, detector.cam_fov)
+    d_row = distance_from_row(cy, detector.cam_h, detector.cam_w, detector.cam_fov)
+    if cy < detector.cam_h / 2 + HORIZON_MARGIN_PX or not 1 / CONSISTENCY_RATIO < d_radius / d_row < CONSISTENCY_RATIO:
+        return False
+    distance = math.sqrt(d_radius * d_row)
+    observed = (pose[0] + distance * math.cos(pose[2] + bearing),
+                pose[1] + distance * math.sin(pose[2] + bearing))
+    return distance < 1.0 and math.dist(observed, target) < 0.4
 
 
 # ======================================================================
@@ -160,6 +224,7 @@ def run(robot, start_pose, ground_truth=None, map_save_path="map.npy", map_save_
     estimator = PoseEstimator(start_pose, use_scan_matching=use_scan_matching, spec=planner.spec)
     detector = TargetDetector(camera.getWidth(), camera.getHeight(), camera.getFov(), debug_dir)
     motion = MotionController()
+    motion.set_timing(dt, LIDAR_PERIOD_MS / 1000.0)
 
     # --- 미션 상태 ---
     x0, y0 = start_pose[0], start_pose[1]
@@ -167,7 +232,7 @@ def run(robot, start_pose, ground_truth=None, map_save_path="map.npy", map_save_
     confirm_until = -1e9; confirm_target = None; confirm_seen = False; confirm_spin_until = -1e9
     path: Optional[List[Tuple[float, float]]] = None
     goal: Optional[Tuple[float, float]] = None
-    visited: List[Tuple[float, float]] = []
+    visits = MissionVisits()
     angles = None; last_scan = None; scan_count = 0; no_frontier_count = 0
     scan_hist: List[Tuple[float, np.ndarray]] = []     # (t, ranges) 최근 스캔들 (slip 감지용)
     slip_time = 0.0; slip_pose_ref = None; recover_until = -1e9; slip_events = 0; slip_goal_count = {}
@@ -175,6 +240,14 @@ def run(robot, start_pose, ground_truth=None, map_save_path="map.npy", map_save_
     last_map_warn = -1e9
     visit_fail = 0; return_fail = 0      # VISIT/RETURN 에서 경로 실패 연속 횟수 (무한 회전 방지)
     v = w = 0.0
+    last_scan_t = -np.inf
+    progress_since = None; progress_xy = None
+    watchdog = ProgressWatchdog()
+    # 진단 전용: 바닥보다 높은 접촉점의 연속 구간 수. 제어 입력에는 쓰지 않는다.
+    contact_node = None; contact_events = 0; in_contact = False
+    if ground_truth is not None and hasattr(robot, "getSelf"):
+        contact_node = robot.getSelf()
+        contact_node.enableContactPointsTracking(timestep, True)
 
     def clip_to_map(g):
         """목표가 지도 밖이면 가장자리에서 0.5 m 안쪽으로 클립 (위치 오차로 목표가 지도 밖에 찍히는 경우)."""
@@ -192,7 +265,9 @@ def run(robot, start_pose, ground_truth=None, map_save_path="map.npy", map_save_
         ranges = read_lidar(lidar)
         if angles is None:
             angles = lidar_angles(len(ranges))
-        new_scan = last_scan is None or not np.array_equal(ranges, last_scan)
+        # 값이 같은 새 스캔도 처리한다. 센서 API에 획득 timestamp가 없어 명목 주기 사용.
+        new_scan = (last_scan is None or not np.array_equal(ranges, last_scan, equal_nan=True)
+                    or t - last_scan_t >= LIDAR_PERIOD_MS / 1000.0)
         valid_scan = new_scan and np.isfinite(ranges).any() and np.nanmax(np.where(np.isfinite(ranges), ranges, 0)) > 0.0
 
         # (1) 위치 추정  [feat/localization]
@@ -204,6 +279,11 @@ def run(robot, start_pose, ground_truth=None, map_save_path="map.npy", map_save_
         if valid_scan:
             scan_hist.append((t, ranges)); scan_hist = [(ts, r) for ts, r in scan_hist if t - ts <= SLIP_WINDOW_S + 0.2]
         moving_cmd = abs(motion.v_cmd) > 0.05 and abs(motion.w_cmd) < 0.4
+        if moving_cmd and state not in ("CONFIRM", "DONE", "BLOCKED") and t >= recover_until:
+            if progress_xy is None or math.dist(pose[:2], progress_xy) > 0.08:
+                progress_xy = pose[:2]; progress_since = t
+        else:
+            progress_xy = None; progress_since = None
         if moving_cmd and len(scan_hist) >= 2 and t - scan_hist[0][0] >= SLIP_WINDOW_S * 0.8 and t >= recover_until:
             old = scan_hist[0][1]
             sec = np.deg2rad(SLIP_SECTOR_DEG)
@@ -218,54 +298,73 @@ def run(robot, start_pose, ground_truth=None, map_save_path="map.npy", map_save_
                 slip_time = 0.0; slip_pose_ref = None
         else:
             slip_time = 0.0; slip_pose_ref = None
-        if slip_time > SLIP_CONFIRM_S:
+        stalled = progress_since is not None and t - progress_since > 8.0
+        if slip_time > SLIP_CONFIRM_S or stalled:
             slip_events += 1
-            estimator.odom.set_pose(slip_pose_ref); pose = slip_pose_ref      # 확정된 뒤에만 가짜 전진 취소
+            if not stalled and slip_pose_ref is not None:
+                estimator.odom.set_pose(slip_pose_ref); pose = slip_pose_ref
             ox = pose[0] + OBSTACLE_AHEAD_M * math.cos(pose[2]); oy = pose[1] + OBSTACLE_AHEAD_M * math.sin(pose[2])
             planner.mark_obstacle(ox, oy, 0.15)
+            motion.remember_obstacle(ox, oy, 0.15)
             key = None if goal is None else (round(goal[0], 1), round(goal[1], 1))
             slip_goal_count[key] = slip_goal_count.get(key, 0) + 1
             if goal is not None and slip_goal_count[key] >= 2:
                 planner.give_up_goal(goal); print(f"[{t:.1f}s] 같은 목표에서 2번 걸림 → 목표 포기 {key}")
             print(f"[{t:.1f}s] !! 헛바퀴 감지 ({slip_events}회): 앞 {OBSTACLE_AHEAD_M} m 에 장애물 표시, {RECOVER_BACK_S} s 후진 후 재계획")
             recover_until = t + RECOVER_BACK_S; slip_time = 0.0; slip_pose_ref = None; path = None
+            progress_since = None; progress_xy = None
+
+        navigating = (goal is not None and state in ("EXPLORE", "VISIT", "APPROACH", "RETURN")
+                      and math.dist(pose[:2], goal) > ARRIVE_DIST and t >= recover_until)
+        if watchdog.update(pose, t, navigating):
+            print(f"[{t:.1f}s] !! 국소 정체: 15초 위치 진행 없음 → 안전 후진·재계획")
+            if state == "EXPLORE":
+                planner.give_up_goal(goal); goal = None
+            recover_until = t + RECOVER_BACK_S
+            path = None
+            watchdog.update(pose, t, False)
 
         # (2) 지도 갱신  [feat/exploration]  (새 스캔일 때만. LiDAR 100 ms 주기)
         if new_scan:
             if valid_scan:
                 planner.update_map(pose, angles, ranges); scan_count += 1
             last_scan = ranges
+            last_scan_t = t
 
         # (3) 대상 탐지  [feat/vision]
         detector.process(camera.getImage(), pose, t)
         found_targets = detector.targets
 
         # (4) 미션 상태 기계 + 경로 계획  [integration]  (스캔 3개 쌓인 뒤, 1 s 주기)
-        if scan_count >= 3 and t >= recover_until and (path is None or t - last_plan_t > REPLAN_PERIOD_S):
+        if scan_count >= 3 and t >= recover_until and t - last_plan_t > REPLAN_PERIOD_S:
             last_plan_t = t
-            if state == "EXPLORE" and len(found_targets) >= TARGET_COUNT:
-                state = "VISIT"; print(f"[{t:.1f}s] 대상 {len(found_targets)}개 확보 → 탐색 중단, VISIT")
+            if state == "EXPLORE" and visits.select(found_targets, pose, t) is not None:
+                state = "VISIT"; print(f"[{t:.1f}s] 미방문 사과 ID={visits.active} → VISIT")
             if state == "EXPLORE":
                 goal = planner.next_exploration_goal(pose, current_goal=goal)
                 if goal is None:
                     no_frontier_count += 1
-                    if no_frontier_count >= 3:
-                        state = "VISIT" if found_targets else "RETURN"; print(f"[{t:.1f}s] 탐색 완료 → {state}")
+                    # 탐색 목표가 없어도 두 사과 방문 전에는 성공/복귀로 간주하지 않는다.
+                    # 센서 시야를 돌리고 재시도. 무한 대기 대신 명시적인 미완료 상태.
+                    if no_frontier_count >= 30 and not visits.retry_after:
+                        state = "BLOCKED"; print(f"[{t:.1f}s] 미션 미완료: 방문 {len(visits.completed)}/{TARGET_COUNT}, 탐색 경로 없음")
                 else:
                     no_frontier_count = 0
             target_goal = None
             if state == "VISIT":
-                remaining = [tg for tg in found_targets if tg not in visited]
-                if remaining:
-                    target_goal = min(remaining, key=lambda tg: math.hypot(tg[0] - pose[0], tg[1] - pose[1]))
+                if visits.active is None:
+                    visits.select(found_targets, pose, t)
+                if visits.active is not None:
+                    target_goal = found_targets[visits.active]
                     goal = target_goal
                     if math.hypot(goal[0] - pose[0], goal[1] - pose[1]) < CONFIRM_DIST:
-                        visited.append(goal); print(f"[{t:.1f}s] 대상 {CONFIRM_DIST} m 안 도착 ({goal[0]:.2f}, {goal[1]:.2f}) → 확인 단계(CONFIRM)")
+                        print(f"[{t:.1f}s] 대상 {CONFIRM_DIST} m 안 도착 ({goal[0]:.2f}, {goal[1]:.2f}) → 확인 단계(CONFIRM)")
                         state = "CONFIRM"; confirm_target = goal; confirm_until = t + CONFIRM_HOLD_S
                         confirm_spin_until = -1e9; confirm_seen = False
                         goal = None; target_goal = None; visit_fail = 0
                 else:
-                    state = "RETURN"
+                    state = "RETURN" if visits.complete else "EXPLORE"
+                    goal = None
             if state == "CONFIRM":
                 # 도착 후: 사과를 바라보고 정지 → 카메라로 재확인 → (못 보면 제자리 회전) → 복귀
                 if confirm_spin_until < 0 and t >= confirm_until:
@@ -276,29 +375,29 @@ def run(robot, start_pose, ground_truth=None, map_save_path="map.npy", map_save_
                         print(f"[{t:.1f}s] 정지 중 대상 미확인 → 제자리 회전으로 재탐색 {CONFIRM_SPIN_S:.0f} s")
                         confirm_spin_until = t + CONFIRM_SPIN_S
                 elif confirm_spin_until > 0 and (t >= confirm_spin_until or confirm_seen):
-                    print(f"[{t:.1f}s] {'✓ 구조 대상 확인 완료 → 최종 접근' if confirm_seen else '대상 재확인 실패 (기록 좌표로 최종 접근)'}")
-                    state = "APPROACH"
+                    if confirm_seen:
+                        state = "APPROACH"
+                    else:
+                        print(f"[{t:.1f}s] 재확인 실패 → 방문 미인정, 탐색 후 재시도")
+                        visits.defer(t); state = "EXPLORE"
                 goal = None
             if state == "APPROACH":
                 # 재확인 때 더 가까이서 본 관측으로 detector 가 좌표를 갱신했을 수 있으니 최신 좌표 사용
-                near = min(found_targets, key=lambda tg: math.hypot(tg[0] - confirm_target[0], tg[1] - confirm_target[1]))
+                near = found_targets[visits.active]
                 confirm_target = near
                 goal = near
-                if math.hypot(goal[0] - pose[0], goal[1] - pose[1]) < ARRIVE_DIST:
-                    print(f"[{t:.1f}s] ★ 최종 도달 ({goal[0]:.2f}, {goal[1]:.2f}) 거리 {math.hypot(goal[0] - pose[0], goal[1] - pose[1]):.2f} m → 복귀")
-                    state = "RETURN"; goal = None
             if state == "RETURN":
                 goal = (x0, y0)
-                if math.hypot(pose[0] - x0, pose[1] - y0) < HOME_DIST:
-                    state = "DONE"; goal = None; print(f"[{t:.1f}s] 복귀 완료")
+                if visits.complete and math.hypot(pose[0] - x0, pose[1] - y0) < HOME_DIST:
+                    state = "DONE"; goal = None; print(f"[{t:.1f}s] 복귀 완료: 빨간 사과 {len(visits.completed)}개 방문 성공")
             goal = clip_to_map(goal)
             path = planner.plan(pose, goal) if goal is not None else None
             if goal is not None and path is None:
                 if state == "VISIT" and target_goal is not None:
                     visit_fail += 1
                     if visit_fail >= 3:                      # 3번 연속 경로 실패 → 그 대상 포기 (무한 회전 방지)
-                        visited.append(target_goal); visit_fail = 0
-                        print(f"[{t:.1f}s] 대상 ({target_goal[0]:.2f}, {target_goal[1]:.2f}) 까지 경로 3회 실패 → 포기")
+                        visits.defer(t); visit_fail = 0; state = "EXPLORE"; goal = None; path = None
+                        print(f"[{t:.1f}s] 대상 경로 3회 실패 → 방문 미인정, 탐색 후 재시도")
                 elif state == "RETURN":
                     return_fail += 1
                     if return_fail >= 5:                     # 5번 연속 실패 → 미탐색 칸도 지나가도록 재시도
@@ -315,6 +414,18 @@ def run(robot, start_pose, ground_truth=None, map_save_path="map.npy", map_save_
                 last_map_warn = t
                 print(f"[{t:.1f}s] !! 지도 밖 측정값 {planner.grid.dropped_hits}개 → exploration.MAP_HALF_M 확인")
 
+        # 도착 판정은 A*의 1초 주기와 분리한다. 0.22m/s에서 최대 22cm 더 진입하는 것을 방지.
+        if state == "APPROACH" and visits.active is not None:
+            target = found_targets[visits.active]
+            distance = math.dist(pose[:2], target)
+            if visits.finish(distance, confirm_seen):
+                state = "RETURN" if visits.complete else "EXPLORE"
+                print(f"[{t:.1f}s] ★ 방문 성공 {len(visits.completed)}/{TARGET_COUNT}: ({target[0]:.2f}, {target[1]:.2f}) 거리 {distance:.2f} m → {state}")
+                # 이미 관측한 낮은 사과도 이후 궤적에서 장애물로 기억한다.
+                # 사과 반경뿐 아니라 위치 추정 오차도 포함해 출발 시 재접근을 막는다.
+                motion.remember_obstacle(*target, radius=0.18)
+                goal = None; path = None; no_frontier_count = 0
+
         # (5) 속도 명령  [feat/dwa]   (환경변수 GRIDNAV_HOLD=초 를 주면 그동안 정지: 비전 테스트용)
         v, w = motion.command(pose, path, ranges, angles, state)
         if state == "CONFIRM":
@@ -323,7 +434,7 @@ def run(robot, start_pose, ground_truth=None, map_save_path="map.npy", map_save_
             else:                                                                 # 사과 방향으로 몸 돌린 뒤 정지
                 err = wrap_angle(math.atan2(confirm_target[1] - pose[1], confirm_target[0] - pose[0]) - pose[2])
                 v, w = (0.0, float(np.clip(2.0 * err, -1.2, 1.2))) if abs(err) > math.radians(5) else (0.0, 0.0)
-            if detector.last_det is not None and not confirm_seen:               # 가까이서 다시 보임
+            if not confirm_seen and confirms_active_target(detector, pose, confirm_target):
                 confirm_seen = True
                 bgr = vision.webots_image_to_bgr(camera.getImage(), detector.cam_w, detector.cam_h)
                 vision.save_debug_frame(vision.draw_detection(bgr, detector.last_det, "confirmed"),
@@ -331,13 +442,27 @@ def run(robot, start_pose, ground_truth=None, map_save_path="map.npy", map_save_
                 print(f"[{t:.1f}s] 카메라로 대상 재확인 (r={detector.last_det[2]:.0f}px) → confirmed.jpg 저장")
         if t < recover_until:                        # 복구 중: 후진
             v, w = -0.10, 0.0
-            motion.v_cmd, motion.w_cmd = v, w
+        if state == "EXPLORE" and goal is None and no_frontier_count > 0:
+            v, w = 0.0, 0.5
+        if state in ("DONE", "BLOCKED"):
+            v, w = 0.0, 0.0
         if t < HOLD_SECONDS:
             v, w = 0.0, 0.0
+        # 복구 후진/확인 회전도 동일한 LiDAR 안전 검사를 거친다.
+        v, w = motion.guard_command(v, w, ranges, angles)
+        motion.set_applied_velocity(v, w)
         wl, wr = to_wheel_speeds(v, w)
         left_motor.setVelocity(wl); right_motor.setVelocity(wr)
 
         # (6) 로그 / 지도 저장 / Display  [integration]
+        if contact_node is not None:
+            contacts = [cp for cp in contact_node.getContactPoints(True) if cp.point[2] > 0.02]
+            touching = bool(contacts)
+            if touching and not in_contact:
+                contact_events += 1
+                print(f"[{t:.1f}s] !! 비바닥접촉={contact_events} (진단용, z>0.02m) "
+                      f"높이={[round(cp.point[2], 3) for cp in contacts]} 노드={[cp.node_id for cp in contacts]}")
+            in_contact = touching
         if map_save_path and t - last_save >= map_save_every_s:
             last_save = t
             tern, spec = planner.get_map()
@@ -357,7 +482,7 @@ def run(robot, start_pose, ground_truth=None, map_save_path="map.npy", map_save_
             err = f" 위치오차={math.hypot(pose[0] - gt[0], pose[1] - gt[1]):.2f}m" if gt else ""
             print(f"[{t:6.1f}s] {state:8s} pose=({pose[0]:.2f},{pose[1]:.2f},{math.degrees(pose[2]):.0f}°){err} "
                   f"목표={None if goal is None else (round(goal[0], 2), round(goal[1], 2))} 경로점={0 if not path else len(path)} "
-                  f"v={v:.2f} w={w:+.2f} 대상={len(found_targets)} 헛바퀴={slip_events} 보정={estimator.corrections} 비전거부={detector.rejected} 지도밖hit={planner.grid.dropped_hits}")
+                  f"v={v:.2f} w={w:+.2f} 대상={len(found_targets)} 방문={len(visits.completed)}/{TARGET_COUNT} 헛바퀴={slip_events} 보정={estimator.corrections} 비바닥접촉={contact_events if contact_node else '미계측'} 비전거부={detector.rejected} 지도밖hit={planner.grid.dropped_hits}")
 
 
 if __name__ == "__main__":
