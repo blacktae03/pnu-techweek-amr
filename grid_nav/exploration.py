@@ -27,10 +27,6 @@ MAP_HALF_M = 20.0           # 시작점 기준 ±20 m. apartment 서쪽 끝이 �
 RESOLUTION = 0.05           # 600x600 격자. A* 가 느리면 0.075 로
 REPLAN_PERIOD_S = 1.0
 MIN_FRONTIER_CELLS = 6
-SNAP_RADIUS_M = 0.6         # (j) 좁은 방: frontier 군집이 전부 벽 0.2 m 안(팽창 영역)이어도 버리지 않고, 중심에서 이 반경 안의
-                            #     가장 가까운 통과·도달 가능 칸을 목표로 스냅. 2차 지도: 시작점 북쪽 작은 방 frontier 166칸 중
-                            #     통과 가능 5칸, 변기방 4칸 → 후보에서 걸러져 '죽어도 안 들어감'. 카메라는 2 m 밖에서도 보므로
-                            #     그 칸 '앞' 에 서면 충분하다.
 GOAL_KEEP_RADIUS = 0.5      # 현재 목표 이 반경 안에 frontier 가 남아 있으면 목표 유지 (진동 방지)
 BLACKLIST_TTL_S = 90.0      # 포기한 목표를 이만큼만 피한다. 영구 블랙리스트는 정체가 반복되면 모든 frontier 를 지워
                             # "탐색 경로 없음"(기준선 c54afcb: 525 s BLOCKED) 으로 끝난다. 시간이 지나면 다시 시도.
@@ -109,62 +105,23 @@ class GridPlanner:
             dm = bfs_distance_map(free, (int(r), int(c)))
         return dm
 
-    def _snap(self, centroid_rc, ok, radius_cells):
-        """centroid 주변 radius_cells 창에서 ok(True) 인 가장 가까운 칸. 없으면 None."""
-        r0, c0 = int(round(centroid_rc[0])), int(round(centroid_rc[1]))
-        k = radius_cells
-        ra, rb = max(0, r0 - k), min(self.spec.rows, r0 + k + 1)
-        ca, cb = max(0, c0 - k), min(self.spec.cols, c0 + k + 1)
-        win = ok[ra:rb, ca:cb]
-        if not win.any():
-            return None
-        yy, xx = np.nonzero(win)
-        d2 = (yy + ra - centroid_rc[0]) ** 2 + (xx + ca - centroid_rc[1]) ** 2
-        i = int(np.argmin(d2))
-        return (int(yy[i] + ra), int(xx[i] + ca))
-
-    def _snap_clusters(self, clusters, pose):
-        """(j) 각 군집의 goal_rc 를 통과 가능 칸으로, 다시 도달 가능 칸으로 스냅. 스냅 실패 군집은 제거.
-        반환 (군집 목록, 경로거리 지도)."""
-        passable = self._inflated == 0
-        k = int(SNAP_RADIUS_M / self.spec.resolution)
-        kept = []
-        for f in clusters:
-            if not passable[f.goal_rc]:
-                g = self._snap(f.centroid_rc, passable, k)
-                if g is None:
-                    continue
-                f.goal_rc = g
-            kept.append(f)
-        dm = self._path_dist_map(pose, kept)
-        if dm is not None:
-            reach = passable & np.isfinite(dm)
-            out = []
-            for f in kept:
-                if np.isfinite(dm[f.goal_rc]):
-                    out.append(f); continue
-                g = self._snap(f.centroid_rc, reach, k)
-                if g is not None:
-                    f.goal_rc = g; out.append(f)
-            kept = out
-        return kept, dm
-
     def _candidates(self, pose):
-        """(frontier 군집 + 미확인 군집, frontier 마스크|미확인 마스크, 경로거리 지도)
-        (j) frontier 는 팽창 필터 없이 뽑고(좁은 방 안 frontier 보존) 목표 칸만 통과·도달 가능 칸으로 스냅."""
-        fmask = frontier_mask(self._ternary, None)
+        """(frontier 군집 + 미확인 군집, frontier 마스크|미확인 마스크, 경로거리 지도)"""
+        fmask = frontier_mask(self._ternary, self._inflated)
         unseen = self.unseen_mask(); self.unseen_cells = int(unseen.sum())
         frontiers = cluster_frontiers(fmask, min_size=MIN_FRONTIER_CELLS)
         unseen_cl = cluster_frontiers(unseen, min_size=UNSEEN_MIN_CELLS) if UNIFIED_UNSEEN else []
         rr, cc = self.spec.world_to_grid(pose[0], pose[1])
         for f in unseen_cl:
             f.kind = "unseen"
+            # 미확인 군집은 방 전체만큼 클 수 있어 중심 칸은 멀거나 가구 위 → 로봇에서 가장 가까운(단 1 m 이상 떨어진) 칸을 목표로.
+            # 가까운 것부터 훑으면 그 자리가 '봤다' 로 바뀌며 목표가 앞으로 밀려가는 청소기식 스윕이 된다.
             d2 = (f.cells[:, 0] - rr) ** 2 + (f.cells[:, 1] - cc) ** 2
             far = d2 >= (UNSEEN_GOAL_MIN_M / self.spec.resolution) ** 2
             idx = int(np.argmin(np.where(far, d2, np.inf))) if far.any() else int(np.argmax(d2))
             f.goal_rc = (int(f.cells[idx, 0]), int(f.cells[idx, 1]))
-        cands, dm = self._snap_clusters(frontiers + unseen_cl, pose)
-        return cands, (fmask | unseen) if UNIFIED_UNSEEN else fmask, dm
+        cands = frontiers + unseen_cl
+        return cands, (fmask | unseen) if UNIFIED_UNSEEN else fmask, self._path_dist_map(pose, cands)
 
     def _path_len(self, pose, goal_xy, dist_map):
         r, c = self.spec.world_to_grid(goal_xy[0], goal_xy[1])
@@ -195,7 +152,7 @@ class GridPlanner:
         if current_goal is not None:
             r, c = self.spec.world_to_grid(current_goal[0], current_goal[1])
             r = int(np.clip(r, 0, self.spec.rows - 1)); c = int(np.clip(c, 0, self.spec.cols - 1))
-            k = int((keep_radius + SNAP_RADIUS_M) / self.spec.resolution)   # (j) 목표는 frontier 에서 최대 SNAP 만큼 떨어질 수 있음
+            k = int(keep_radius / self.spec.resolution)
             still_valid = mask[max(0, r - k):r + k + 1, max(0, c - k):c + k + 1].any()
             goal_passable = self._inflated[r, c] == 0
             far_enough = np.hypot(current_goal[0] - pose[0], current_goal[1] - pose[1]) > 0.3
@@ -297,9 +254,7 @@ class GridPlanner:
         clusters = cluster_frontiers(unseen, min_size=MIN_UNSEEN_CELLS)
         if not clusters:
             return None
-        clusters, dist_map = self._snap_clusters(clusters, pose)   # (j) 도달 불가 군집은 근처 도달 가능 칸으로
-        if not clusters:
-            return None
+        dist_map = self._path_dist_map(pose, clusters)
         f = select_frontier(clusters, pose, self.spec, blacklist_xy=self.blacklist, dist_map=dist_map,
                             w_dist=W_DIST, w_size=0.01, size_cap=200, w_turn=W_TURN)
         return f.goal_xy(self.spec) if f else None
