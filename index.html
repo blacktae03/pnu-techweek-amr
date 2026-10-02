@@ -460,6 +460,9 @@ footer .tile p { font-size: 15px; }
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
 <script>
 (function () {
+  // 새로고침·재방문 때 브라우저가 이전 스크롤 위치를 복원하지 않도록, 주소에 #섹션이 없으면 항상 맨 위에서 시작
+  try { if ('scrollRestoration' in history) history.scrollRestoration = 'manual'; } catch (e) {}
+  if (!location.hash) window.scrollTo(0, 0);
   var reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
   // 1) 코드 줄 하이라이트
