@@ -4,6 +4,8 @@ TurtleBot3 Burger(Webots R2025a)가 **지도 없는 아파트**를 스스로 탐
 
 시연 코드는 태그 `v1.0-hackathon` (main) 입니다.
 
+> **▶ 웹 버전: [blacktae03.github.io/pnu-techweek-amr](https://blacktae03.github.io/pnu-techweek-amr/)** — 완주 영상(9.6배속), 영상과 동기화된 상태 표시, 기술별 시뮬레이터 클립과 실제 코드, 발표 질의응답. 웹 페이지 소스는 `gh-pages` 브랜치에 있습니다.
+
 ---
 
 ## 1. 미션과 규칙
