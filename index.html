@@ -1,0 +1,556 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>AMR Search &amp; Rescue</title>
+<meta name="description" content="TurtleBot3가 처음 보는 집에서 빨간 사과 두 개를 찾아 돌아오는 완주 영상과 구현 코드. PNU TECH WEEK 2026 Physical AI Hackathon.">
+<meta property="og:title" content="AMR Search &amp; Rescue">
+<meta property="og:description" content="처음 보는 집에서 빨간 사과 두 개를 찾아 돌아오는 로봇 — 완주 영상과 구현 코드">
+<meta property="og:image" content="media/run_poster.jpg">
+<meta name="theme-color" content="#05060f">
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Doto:wght@700;900&family=IBM+Plex+Mono:wght@400;500&family=Noto+Sans+KR:wght@400;500;700;800&family=Sora:wght@400;600;700&display=swap">
+<style>
+/* Layout: 레이더 스캔 히어로 → 영상 + 실시간 상태 띠 → 섹션마다 (유리 카드 미디어 | 설명 타일) 좌우 교차 + 실제 코드 에디터 */
+:root {
+  --bg: #05060f; --bg-2: #0a0d1c; --glass: rgba(186,214,247,.045); --glass-2: rgba(186,214,247,.08);
+  --line: rgba(186,214,247,.12); --line-2: rgba(186,214,247,.24);
+  --fg: #e6eefb; --body: #c7d3ea; --muted: rgba(199,211,234,.66); --faint: rgba(199,211,234,.42);
+  --ice-1: #d8ecf8; --ice-2: #98c0ef; --glow: rgba(174,207,242,.24);
+  --hot: #ff7a45; --hot-soft: rgba(255,122,69,.16); --ok: #5fd3a4; --red: #ff5a6a; --gold: #f2c14e;
+  --code-kw: #9ec6ff; --code-str: #b6e3a1; --code-num: #f5b97a; --code-com: rgba(199,211,234,.42); --code-fn: #d8ecf8;
+  --display: "Sora", "Noto Sans KR", "Apple SD Gothic Neo", sans-serif;
+  --text: "Noto Sans KR", "Apple SD Gothic Neo", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+  --dot: "Doto", "IBM Plex Mono", monospace;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; scroll-padding-top: 76px; }
+body { margin: 0; background: var(--bg); color: var(--body); font-family: var(--text); font-size: 17.5px; line-height: 1.75; -webkit-font-smoothing: antialiased;
+  background-image: radial-gradient(rgba(186,207,247,.10) 1px, transparent 1.4px); background-size: 26px 26px; }
+.wrap { max-width: 1200px; margin: 0 auto; padding-inline: 24px; }
+a { color: var(--ice-1); }
+:focus-visible { outline: 2px solid var(--ice-2); outline-offset: 3px; border-radius: 6px; }
+
+/* 상단 바 */
+.bar { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 20; background: rgba(5,6,15,.94); border-bottom: 1px solid var(--line); }
+.bar .wrap { display: flex; align-items: center; gap: 18px; height: 60px; }
+.brand { font-family: var(--mono); font-size: 13px; color: var(--body); white-space: nowrap; display: flex; align-items: center; gap: 10px; }
+.brand i { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 12px var(--ok); animation: blink 2.4s ease-in-out infinite; }
+@keyframes blink { 50% { opacity: .35; } }
+.toc { display: flex; gap: 2px; overflow-x: auto; scrollbar-width: none; margin-left: auto; }
+.toc a { font-size: 14px; color: var(--muted); text-decoration: none; padding: 6px 12px; border-radius: 999px; white-space: nowrap; }
+.toc a:hover, .toc a[aria-current="true"] { color: var(--fg); background: var(--glass-2); }
+
+/* 공통 타이포 */
+.pill { display: inline-flex; align-items: center; gap: 8px; font-family: var(--mono); font-size: 13px; letter-spacing: .04em; color: var(--ice-1);
+  padding: 6px 14px; border-radius: 999px; border: 1px solid var(--line-2); background: var(--glass); }
+.pill b { color: var(--hot); font-weight: 500; }
+.grad { background: linear-gradient(0deg, var(--ice-1) 0%, var(--ice-2) 100%); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; color: var(--ice-1); text-shadow: 0 2px 22px var(--glow); }
+h1, h2 { font-family: var(--display); font-weight: 800; letter-spacing: -0.025em; text-wrap: balance; margin: 0; }
+h1 { font-size: clamp(38px, 6.2vw, 76px); line-height: 1.08; }
+h2 { font-size: clamp(30px, 4.2vw, 50px); line-height: 1.15; }
+.lead { color: var(--body); font-size: clamp(17px, 1.6vw, 20px); line-height: 1.75; max-width: 46em; text-wrap: pretty; }
+.num { font-family: var(--mono); font-weight: 500; color: var(--ice-1); background: rgba(152,192,239,.12); padding: 1px 7px; border-radius: 6px; white-space: nowrap; font-size: .9em; }
+
+/* 히어로 */
+.hero { position: relative; overflow: hidden; padding-block: 88px 72px; border-bottom: 1px solid var(--line); }
+#radar { position: absolute; inset: 0; width: 100%; height: 100%; display: block; opacity: .9; pointer-events: none; }
+.hero .wrap { position: relative; display: flex; flex-direction: column; align-items: center; text-align: center; gap: 22px; }
+.hero .lead { margin: 0 auto; }
+.stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; width: 100%; max-width: 920px; margin-top: 10px; }
+.stat { background: var(--glass); border: 1px solid var(--line); border-radius: 16px; padding: 16px 14px 14px; box-shadow: inset 0 1px 0 rgba(216,236,248,.10); min-width: 0; }
+.stat .v { font-family: var(--dot); font-weight: 900; font-size: clamp(34px, 4.4vw, 50px); line-height: 1; color: var(--ice-1); text-shadow: 0 0 18px var(--glow); }
+.stat .v small { font-family: var(--mono); font-size: 14px; color: var(--muted); margin-left: 4px; text-shadow: none; }
+.stat .k { font-size: 14px; color: var(--muted); margin-top: 8px; }
+
+/* 빛이 도는 유리 프레임 */
+.frame { position: relative; isolation: isolate; overflow: hidden; border-radius: 18px; background: rgba(186,214,247,.10); padding: 11px; box-shadow: 0 40px 120px -40px rgba(80,130,220,.35); min-width: 0; }
+.frame.orbit::before { content: ""; position: absolute; z-index: -2; left: 50%; top: 50%; width: 160%; aspect-ratio: 1; margin: -80% 0 0 -80%; pointer-events: none;
+  background: conic-gradient(transparent 0 70%, rgba(152,192,239,.85) 82%, #d8ecf8 86%, transparent 92%);
+  animation: orbit 7s linear infinite; animation-play-state: paused; }
+.frame.orbit.live::before { animation-play-state: running; will-change: transform; }
+.frame::after { content: ""; position: absolute; z-index: -1; inset: 1px; border-radius: 17px; background: linear-gradient(180deg, #0d1122, #080a16); box-shadow: inset 0 1px 1px rgba(216,236,248,.16); }
+@keyframes orbit { to { transform: rotate(360deg); } }
+.frame .bar2 { display: flex; align-items: center; gap: 8px; padding: 2px 6px 10px; font-family: var(--mono); font-size: 12.5px; color: var(--muted); min-width: 0; }
+.frame .bar2 i { width: 9px; height: 9px; border-radius: 50%; background: rgba(186,214,247,.18); flex: none; }
+.frame .bar2 span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-left: 6px; }
+.frame img, .frame video { display: block; width: 100%; height: auto; max-width: 100%; border-radius: 10px; background: #0b1020; }
+.frame .cap { font-size: 14px; color: var(--muted); padding: 10px 6px 2px; line-height: 1.55; }
+.video-frame { width: 100%; max-width: 1100px; margin-top: 18px; text-align: left; }
+
+/* 영상 아래 실시간 상태 띠 */
+.ribbon { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; margin-top: 12px; }
+.chip { font-family: var(--mono); font-size: 13px; text-align: center; padding: 9px 4px; border-radius: 10px; color: var(--faint); background: rgba(186,214,247,.04); border: 1px solid var(--line); transition: color .25s, background .25s, border-color .25s, box-shadow .25s; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chip.on { color: #fff; background: var(--hot-soft); border-color: var(--hot); box-shadow: 0 0 24px rgba(255,122,69,.35); }
+.chip.done { color: var(--ice-2); }
+.progress { height: 3px; border-radius: 3px; background: var(--line); margin-top: 10px; overflow: hidden; }
+.progress i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--ice-2), var(--hot)); }
+.ribbon-note { font-family: var(--mono); font-size: 12.5px; color: var(--faint); margin-top: 8px; display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+
+/* 섹션 */
+section.sec { padding-block: 104px 32px; border-bottom: 1px solid var(--line); position: relative; }
+section.sec::before { content: ""; position: absolute; left: 50%; top: 40px; width: min(900px, 90vw); height: 360px; transform: translateX(-50%); pointer-events: none;
+  background: radial-gradient(closest-side, rgba(110,150,230,.13), transparent); }
+.head { position: relative; display: flex; flex-direction: column; align-items: center; text-align: center; gap: 18px; }
+.head .lead { margin: 0; }
+.pair { position: relative; display: grid; grid-template-columns: minmax(0, 7fr) minmax(0, 5fr); gap: 36px; margin-top: 52px; align-items: center; }
+.pair.flip { grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); }
+.pair.flip .frame { order: 2; }
+.tiles { display: grid; gap: 14px; margin: 0; padding: 0; list-style: none; min-width: 0; }
+.tile { position: relative; background: var(--glass); border: 1px solid var(--line); border-radius: 16px; padding: 18px 20px; box-shadow: inset 0 1px 0 rgba(216,236,248,.08); transition: border-color .3s, transform .3s, background .3s; }
+.tile:hover { border-color: var(--line-2); background: var(--glass-2); transform: translateY(-2px); }
+.tile .t { display: inline-block; font-family: var(--mono); font-size: 12.5px; letter-spacing: .06em; color: var(--ice-2); margin-bottom: 6px; }
+.tile.key { border-color: rgba(255,122,69,.45); background: linear-gradient(180deg, rgba(255,122,69,.08), rgba(186,214,247,.03)); }
+.tile.key .t { color: var(--hot); }
+.tile p { margin: 0; color: var(--body); font-size: 16.5px; line-height: 1.72; text-wrap: pretty; }
+
+/* 상태 기계 */
+.fsm { position: relative; margin-top: 56px; display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 30px; }
+.node { position: relative; background: var(--glass); border: 1px solid var(--line-2); border-radius: 16px; padding: 18px 14px; text-align: center; min-width: 0; box-shadow: inset 0 1px 0 rgba(216,236,248,.10); }
+.node::before { content: ""; position: absolute; inset: -1px; border-radius: inherit; border: 1px solid var(--hot); box-shadow: 0 0 28px rgba(255,122,69,.30); opacity: 0; pointer-events: none;
+  animation: lit 12s linear infinite; animation-delay: calc(var(--i) * 2s); will-change: opacity; }
+@keyframes lit { 0%, 14% { opacity: 1; } 18%, 100% { opacity: 0; } }
+.node .n { font-family: var(--mono); font-size: 15px; font-weight: 500; color: var(--fg); letter-spacing: .02em; }
+.node .d { font-size: 14.5px; color: var(--muted); margin-top: 8px; line-height: 1.55; }
+.node:not(:last-child)::after { content: ""; position: absolute; top: 50%; right: -27px; width: 24px; height: 2px; border-radius: 2px;
+  background: linear-gradient(90deg, var(--line-2), var(--ice-2)); }
+.fsm-notes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin-top: 22px; }
+
+/* 에디터 */
+.editor { position: relative; margin-top: 30px; border-radius: 16px; background: rgba(10,13,28,.86); border: 1px solid var(--line); overflow: hidden; box-shadow: inset 0 1px 0 rgba(216,236,248,.08); }
+.tabs { display: flex; align-items: stretch; height: 40px; border-bottom: 1px solid var(--line); overflow-x: auto; scrollbar-width: none; }
+.tab { font-family: var(--mono); font-size: 13px; color: var(--faint); padding: 0 18px; display: flex; align-items: center; border-right: 1px solid var(--line); white-space: nowrap; }
+.tab.active { color: var(--ice-1); background: rgba(186,214,247,.05); box-shadow: inset 0 -2px 0 var(--ice-2); }
+.code { margin: 0; overflow-x: auto; font-family: var(--mono); font-size: 14px; line-height: 1.75; padding: 12px 0; }
+.code .row { display: flex; white-space: pre; min-width: max-content; }
+.code .row.hl { background: linear-gradient(90deg, rgba(255,122,69,.14), rgba(255,122,69,.03) 60%, transparent); box-shadow: inset 2px 0 0 var(--hot); }
+.code .ln { width: 60px; flex: none; text-align: right; padding-right: 20px; color: rgba(199,211,234,.30); user-select: none; }
+.code .lc { padding-right: 28px; color: var(--body); }
+.code .fold .lc, .code .fold .ln { color: var(--faint); font-style: italic; }
+.code .file .lc { color: var(--ice-2); }
+.hljs-keyword, .hljs-built_in, .hljs-literal { color: var(--code-kw); }
+.hljs-string { color: var(--code-str); }
+.hljs-number { color: var(--code-num); }
+.hljs-comment { color: var(--code-com); font-style: italic; }
+.hljs-title, .hljs-title.function_ { color: var(--code-fn); }
+
+
+/* Q&A */
+.qa { display: grid; gap: 18px; margin-top: 52px; }
+.q { background: var(--glass); border: 1px solid var(--line); border-radius: 18px; padding: 26px 28px; box-shadow: inset 0 1px 0 rgba(216,236,248,.08); min-width: 0; }
+.q h3 { font-family: var(--display); font-weight: 700; font-size: clamp(20px, 2.1vw, 25px); line-height: 1.4; color: var(--fg); margin: 0 0 14px; text-wrap: balance; }
+.q h3 .qn { font-family: var(--mono); font-size: 14px; color: var(--hot); margin-right: 10px; vertical-align: 3px; }
+.q p { margin: 0 0 12px; font-size: 16.5px; color: var(--body); text-wrap: pretty; }
+.q p:last-child { margin-bottom: 0; }
+.q .say { border-left: 2px solid var(--ice-2); padding: 6px 0 6px 16px; color: var(--ice-1); }
+.q .scroll { overflow-x: auto; margin: 6px 0 14px; }
+.q table { border-collapse: collapse; width: 100%; font-size: 15px; min-width: 560px; }
+.q th, .q td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.q th { font-family: var(--mono); font-size: 12.5px; letter-spacing: .05em; color: var(--ice-2); font-weight: 500; }
+.q td { color: var(--body); }
+.q td:first-child { color: var(--fg); white-space: nowrap; }
+footer { padding-block: 64px 80px; font-size: 15px; color: var(--muted); }
+footer .grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+footer .tile p { font-size: 15px; }
+
+@media (max-width: 920px) {
+  .pair, .pair.flip { grid-template-columns: minmax(0, 1fr); }
+  .pair.flip .frame { order: 0; }
+  .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .fsm { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+  .node:not(:last-child)::after { display: none; }
+  .fsm-notes, footer .grid { grid-template-columns: minmax(0, 1fr); }
+  .ribbon { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  .frame.orbit::before, .node::before, .brand i { animation: none !important; }
+}
+</style>
+</head>
+<body>
+
+
+<header class="bar">
+  <div class="wrap">
+    <span class="brand"><i></i>pnu-techweek-amr</span>
+    <nav class="toc" aria-label="섹션">
+      <a href="#top">완주</a><a href="#fsm">상태</a><a href="#spin">정찰</a><a href="#goal">목표</a><a href="#apple">판별</a><a href="#obstacle">장애물</a><a href="#confirm">접근</a><a href="#dynamic">회피</a><a href="#qa">Q&amp;A</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+<section class="hero" id="top">
+  <canvas id="radar" aria-hidden="true"></canvas>
+  <div class="wrap">
+    <span class="pill"><b>●</b> PNU TECH WEEK 2026 · Physical AI Hackathon</span>
+    <h1 class="grad">처음 보는 집에서<br>빨간 사과 두 개를 찾아 돌아오는 로봇</h1>
+    <p class="lead">TurtleBot3가 LiDAR와 카메라만으로 지도를 그리고, 사과를 가려내고, 사람을 피해 시작점으로 돌아옵니다. 아래는 같은 코드의 완주 실행을 9.6배속으로 줄인 영상입니다.</p>
+    <div class="stats">
+      <div class="stat"><div class="v">222.8<small>s</small></div><div class="k">1번 사과 도달</div></div>
+      <div class="stat"><div class="v">535.7<small>s</small></div><div class="k">2번 사과 도달</div></div>
+      <div class="stat"><div class="v">577.5<small>s</small></div><div class="k">시작점 복귀</div></div>
+      <div class="stat"><div class="v">0<small>회</small></div><div class="k">장애물 접촉</div></div>
+    </div>
+    <div class="frame orbit video-frame">
+      <div class="bar2"><i></i><i></i><i></i><span>apartment.wbt · 완주 실행 · 9.6× · 뒤따라가는 카메라 + 로봇이 그린 지도</span></div>
+      <video id="run" src="media/run.mp4" poster="media/run_poster.jpg" controls muted playsinline preload="metadata"></video>
+      <div class="ribbon" id="ribbon">
+        <div class="chip" data-s="EXPLORE">EXPLORE</div><div class="chip" data-s="VISIT">VISIT</div><div class="chip" data-s="CONFIRM">CONFIRM</div>
+        <div class="chip" data-s="APPROACH">APPROACH</div><div class="chip" data-s="RETURN">RETURN</div><div class="chip" data-s="DONE">DONE</div>
+      </div>
+      <div class="progress"><i id="prog"></i></div>
+      <div class="ribbon-note"><span id="simt">시뮬 시각 0.0 s</span><span>재생하면 지금 로봇의 상태에 불이 들어옵니다</span></div>
+    </div>
+  </div>
+</section>
+
+<section class="sec" id="fsm">
+  <div class="wrap">
+    <div class="head">
+      <span class="pill">01 · 미션 상태 기계</span>
+      <h2 class="grad">여섯 상태를 지나며,<br>사과를 보는 순간 탐색을 끊습니다</h2>
+      <p class="lead">첫 번째 사과를 방문하면 다시 탐색으로 돌아가 두 번째를 찾고, 두 개를 모두 방문한 뒤 시작점으로 돌아옵니다.</p>
+    </div>
+    <div class="fsm">
+      <div class="node" style="--i:0"><div class="n">EXPLORE</div><div class="d">지도 경계로 이동하며 카메라로 사과 검사</div></div>
+      <div class="node" style="--i:1"><div class="n">VISIT</div><div class="d">사과 앞 0.7 m 지점까지 이동</div></div>
+      <div class="node" style="--i:2"><div class="n">CONFIRM</div><div class="d">멈춰서 다시 판별</div></div>
+      <div class="node" style="--i:3"><div class="n">APPROACH</div><div class="d">0.35 m까지 정밀 접근</div></div>
+      <div class="node" style="--i:4"><div class="n">RETURN</div><div class="d">두 개 방문 후 시작점으로</div></div>
+      <div class="node" style="--i:5"><div class="n">DONE</div><div class="d">시작점 0.2 m 안에서 정지</div></div>
+    </div>
+    <div class="fsm-notes">
+      <div class="tile"><span class="t">↺ 되돌아가는 길</span><p>APPROACH가 끝났을 때 아직 1개째면 EXPLORE로 돌아가 두 번째 사과를 찾습니다. CONFIRM에서 사과가 아니면 방문을 미루고 탐색을 이어 갑니다.</p></div>
+      <div class="tile"><span class="t">SEARCH 폴백</span><p>LiDAR 경계(frontier)가 모두 사라졌는데 사과가 남았으면, 카메라가 아직 못 본 빈칸을 다시 훑습니다.</p></div>
+    </div>
+  </div>
+</section>
+
+<section class="sec" id="spin">
+  <div class="wrap">
+    <div class="head">
+      <span class="pill">02 · 탐색 — 제자리 정찰</span>
+      <h2 class="grad">카메라의 사각을 메우는 한 바퀴</h2>
+      <p class="lead">LiDAR는 360°를 보지만, 사과를 알아보는 카메라는 앞쪽 60°만 봅니다. 지도가 완성됐다고 사과까지 본 것은 아닙니다.</p>
+    </div>
+    <div class="pair">
+      <figure class="frame" style="margin:0">
+        <div class="bar2"><i></i><i></i><i></i><span>위에서 본 장면 · 뒤따라가는 카메라 · t = 67.6~75.5 s</span></div>
+        <video class="clip" src="media/02_spin.mp4" poster="media/02_spin_poster.jpg" muted loop playsinline preload="none" aria-label="위에서 본 로봇이 제자리에서 한 바퀴 돌며 주황색 60도 카메라 시야가 주변을 한 바퀴 쓸고, 오른쪽에는 로봇 뒤에서 본 장면이 함께 나온다"></video>
+        <figcaption class="cap">주황 부채꼴 = 카메라 시야 60° · 파란 원 = 카메라로 ‘확인’했다고 인정하는 반경 1.2 m</figcaption>
+      </figure>
+      <ul class="tiles">
+        <li class="tile"><span class="t">문제</span><p>LiDAR 지도는 문 너머까지 빠르게 완성되지만, 카메라가 실제로 확인한 바닥은 일부입니다. 첫 실험에서 빨간 사과 옆을 여러 번 지나치고도 한 번도 정면에 두지 못했습니다.</p></li>
+        <li class="tile"><span class="t">동작</span><p>새 탐색 목표가 정해진 직후, 출발 전에 주변 <span class="num">2 m</span> 안의 ‘카메라 미확인 칸’을 셉니다. <span class="num">120</span>칸 이상이면 제자리에서 한 바퀴(<span class="num">5.2 s</span>) 돌고, 25초 안에는 다시 돌지 않습니다.</p></li>
+        <li class="tile key"><span class="t">결과</span><p>시연 실행에서 두 번째 사과는 옆 <span class="num">0.8 m</span>를 반대 방향으로 지나친 뒤, 방을 떠나기 직전 이 회전 중에 발견됐습니다.</p></li>
+      </ul>
+    </div>
+    <div class="editor">
+      <div class="tabs"><span class="tab active">grid_nav/webots_adapter.py</span></div>
+      <pre class="code" data-src="grid_nav/webots_adapter.py:49-51,476-480,534-535" data-hl="49,478,535"><span class="row hl"><span class="ln">49</span><span class="lc" data-py>LOOKAROUND_W = 1.2          # [rad/s] 탐색 목표를 바꿀 때 제자리 한 바퀴 둘러보기 (카메라 60° 는 좁다: 1차 실행에서 빨간 사과 2.5 m 옆을</span></span><span class="row"><span class="ln">50</span><span class="lc" data-py>LOOKAROUND_MIN_UNSEEN = 120 #   137회 지나치며 한 번도 정면에 두지 않음). 주변 2 m 에 미확인 칸이 이만큼 있을 때만, 25 s 에 1회.</span></span><span class="row"><span class="ln">51</span><span class="lc" data-py>LOOKAROUND_COOLDOWN_S = 25.0</span></span><span class="row fold"><span class="ln">⋯</span><span class="lc">424줄 생략</span></span><span class="row"><span class="ln">476</span><span class="lc" data-py>            if (state in (&quot;EXPLORE&quot;, &quot;SEARCH&quot;) and goal is not None and prev_goal is not None</span></span><span class="row"><span class="ln">477</span><span class="lc" data-py>                    and math.dist(goal, prev_goal) &gt; 0.5 and t - last_spin &gt; LOOKAROUND_COOLDOWN_S</span></span><span class="row hl"><span class="ln">478</span><span class="lc" data-py>                    and t &gt;= recover_until and planner.unseen_near(pose, 2.0) &gt;= LOOKAROUND_MIN_UNSEEN):</span></span><span class="row"><span class="ln">479</span><span class="lc" data-py>                spin_until = t + 2 * math.pi / LOOKAROUND_W; last_spin = t; lookarounds += 1</span></span><span class="row"><span class="ln">480</span><span class="lc" data-py>                print(f&quot;[{t:.1f}s] 목표 변경 → 제자리 둘러보기 {2 * math.pi / LOOKAROUND_W:.1f} s (주변 미확인 {planner.unseen_near(pose, 2.0)}칸)&quot;)</span></span><span class="row fold"><span class="ln">⋯</span><span class="lc">53줄 생략</span></span><span class="row"><span class="ln">534</span><span class="lc" data-py>        if state in (&quot;EXPLORE&quot;, &quot;SEARCH&quot;) and t &lt; spin_until:</span></span><span class="row hl"><span class="ln">535</span><span class="lc" data-py>            v, w = 0.0, LOOKAROUND_W                                              # 둘러보기: 제자리 회전 (카메라로 주변 훑기)</span></span></pre>
+    </div>
+  </div>
+</section>
+
+<section class="sec" id="goal">
+  <div class="wrap">
+    <div class="head">
+      <span class="pill">03 · 탐색 — 목표 선정</span>
+      <h2 class="grad">가까움을 ‘걸어가는 거리’로 잽니다</h2>
+      <p class="lead">지도의 빨간 별은 매 재계획마다 가장 가까운 frontier(빈칸과 미탐색 영역의 경계)로 정해집니다. Greedy는 그대로 두고, 거리를 재는 방법을 바꿨습니다.</p>
+    </div>
+    <div class="pair flip">
+      <figure class="frame" style="margin:0">
+        <div class="bar2"><i></i><i></i><i></i><span>로봇이 그린 실제 지도 · 실행 388 s</span></div>
+        <img src="media/03_goal_bfs.png" alt="실제 지도 위 비교. 직선거리로 1.84 m인 벽 너머 frontier는 실제 경로가 4.25 m이고, BFS 경로거리로 고른 같은 공간의 frontier는 실제 2.40 m다" loading="lazy">
+        <figcaption class="cap">파란 음영 = 로봇에서의 BFS 경로거리 · 빨간 X = 직선거리 선택 · 주황 별 = 경로거리 선택</figcaption>
+      </figure>
+      <ul class="tiles">
+        <li class="tile"><span class="t">문제</span><p>직선거리로 고르면 벽 너머 목표가 가장 가까워 보입니다. 로봇은 방을 다 보지 않고 나갔다가 다시 돌아오는 왕복을 반복했습니다.</p></li>
+        <li class="tile"><span class="t">해결</span><p>로봇 위치에서 BFS를 한 번 돌려 모든 칸까지의 경로거리를 구하고(약 <span class="num">45 ms</span>), 그 값으로 고릅니다. 도착 전에는 목표를 바꾸지 않고, 새 후보가 남은 거리의 절반 미만일 때만 교체합니다.</p></li>
+        <li class="tile key"><span class="t">결과</span><p>한 공간을 끝내고 다음으로 넘어가 첫 사과 발견이 <span class="num">381 s → 234 s</span>로 줄었습니다. 도착 전 목표 변경(수정 전 35회 전부)이 만들던 진동도 사라졌습니다.</p></li>
+      </ul>
+    </div>
+    <div class="editor">
+      <div class="tabs"><span class="tab active">grid_nav/exploration.py</span></div>
+      <pre class="code" data-src="grid_nav/exploration.py:37-37,48-48,96-106,163-171" data-hl="37,48,103,170,171"><span class="row hl"><span class="ln">37</span><span class="lc" data-py>W_DIST = 3.0                # 경로거리 가중치를 지배적으로(1.0→3.0): 가장 가까운 목표부터 → 같은 방을 다 보고 나감 (h)</span></span><span class="row fold"><span class="ln">⋯</span><span class="lc">10줄 생략</span></span><span class="row hl"><span class="ln">48</span><span class="lc" data-py>SWITCH_RATIO = 0.5          # 현재 목표가 유효하면 유지. 새 후보 경로거리가 남은 거리의 이 비율 미만일 때만 교체 (중도 이탈 방지)</span></span><span class="row fold"><span class="ln">⋯</span><span class="lc">47줄 생략</span></span><span class="row"><span class="ln">96</span><span class="lc" data-py>    def _path_dist_map(self, pose, clusters):</span></span><span class="row"><span class="ln">97</span><span class="lc" data-py>        &quot;&quot;&quot;BFS 경로거리 지도. 축소 격자로 먼저 계산하고, 후보 군집이 하나도 도달 불가로 나오면(좁은 문이 축소에 막힘)</span></span><span class="row"><span class="ln">98</span><span class="lc" data-py>        전해상도(≈0.6 s) 로 다시 계산한다.&quot;&quot;&quot;</span></span><span class="row"><span class="ln">99</span><span class="lc" data-py>        if not (USE_PATH_DIST and clusters):</span></span><span class="row"><span class="ln">100</span><span class="lc" data-py>            return None</span></span><span class="row"><span class="ln">101</span><span class="lc" data-py>        r, c = self.spec.world_to_grid(pose[0], pose[1])</span></span><span class="row"><span class="ln">102</span><span class="lc" data-py>        free = self._inflated == 0</span></span><span class="row hl"><span class="ln">103</span><span class="lc" data-py>        dm = bfs_distance_map_coarse(free, (int(r), int(c)), BFS_COARSE_FACTOR)</span></span><span class="row"><span class="ln">104</span><span class="lc" data-py>        if not any(np.isfinite(dm[f.goal_rc]) for f in clusters):</span></span><span class="row"><span class="ln">105</span><span class="lc" data-py>            dm = bfs_distance_map(free, (int(r), int(c)))</span></span><span class="row"><span class="ln">106</span><span class="lc" data-py>        return dm</span></span><span class="row fold"><span class="ln">⋯</span><span class="lc">56줄 생략</span></span><span class="row"><span class="ln">163</span><span class="lc" data-py>            elif still_valid and far_enough and not_blacklisted:</span></span><span class="row"><span class="ln">164</span><span class="lc" data-py>                remaining = self._path_len(pose, current_goal, dist_map)</span></span><span class="row"><span class="ln">165</span><span class="lc" data-py>                f = pick(pool)</span></span><span class="row"><span class="ln">166</span><span class="lc" data-py>                if f is None:</span></span><span class="row"><span class="ln">167</span><span class="lc" data-py>                    return tuple(current_goal)</span></span><span class="row"><span class="ln">168</span><span class="lc" data-py>                g = f.goal_xy(self.spec)</span></span><span class="row"><span class="ln">169</span><span class="lc" data-py>                if np.hypot(g[0] - current_goal[0], g[1] - current_goal[1]) &lt; keep_radius \</span></span><span class="row hl"><span class="ln">170</span><span class="lc" data-py>                        or self._path_len(pose, g, dist_map) &gt;= SWITCH_RATIO * remaining:</span></span><span class="row hl"><span class="ln">171</span><span class="lc" data-py>                    return tuple(current_goal)               # 도착 전 교체 금지 (훨씬 가까운 새 후보만 예외)</span></span></pre>
+    </div>
+  </div>
+</section>
+
+<section class="sec" id="apple">
+  <div class="wrap">
+    <div class="head">
+      <span class="pill">04 · 인식 — 사과 판별</span>
+      <h2 class="grad">학습 모델 대신,<br>잴 수 있는 조건으로 가려냅니다</h2>
+      <p class="lead">실제 사과 사진으로 학습된 YOLO는 시뮬레이터의 단색 3D 사과를 사과로 알아보지 못했습니다. 그래서 색·모양·위치 조건을 차례로 쌓았습니다.</p>
+    </div>
+    <div class="pair">
+      <figure class="frame" style="margin:0">
+        <div class="bar2"><i></i><i></i><i></i><span>로봇 카메라 640×480 · 판별 과정</span></div>
+        <img src="media/04_apple_pipeline.png" alt="판별 과정. 위: 빨간 사과는 HSV 마스크, 원형도 0.91, 종횡비 1.27, 주변 빨강 0%로 통과. 아래: 소화기는 원형도 0.36, 종횡비 2.11, 주변 빨강 29%로 탈락" loading="lazy">
+        <figcaption class="cap">위 = 0.7 m 재확인 프레임 · 아래 = 초기 오탐 사례(소화기)</figcaption>
+      </figure>
+      <ul class="tiles">
+        <li class="tile"><span class="t">조건</span><p>빨간색(채도 <span class="num">≥160</span>) → 원형도 <span class="num">≥0.70</span> → 물체 가로세로 비 <span class="num">0.65–1.5</span> → 주변 빨강 <span class="num">≤10%</span> → 화면 수평선 아래 → 크기로 잰 거리와 화면 높이로 잰 거리 일치 → 2프레임 연속.</p></li>
+        <li class="tile"><span class="t">근거</span><p>집 안의 빨간 물체를 모아 재 보니 캔·스티커·카펫 무늬의 원형도가 <span class="num">0.45–0.50</span>에 몰려 있어 기준을 <span class="num">0.70</span>으로 올렸습니다.</p></li>
+        <li class="tile key"><span class="t">결과</span><p>물체 프레임 <span class="num">117</span>장에서 오탐 <span class="num">0</span>, <span class="num">2.5 m</span> 안의 빨간 사과는 <span class="num">100%</span> 탐지.</p></li>
+      </ul>
+    </div>
+    <div class="editor">
+      <div class="tabs"><span class="tab active">grid_nav/vision.py</span></div>
+      <pre class="code" data-src="grid_nav/vision.py:94-112" data-hl="102,105,107"><span class="row"><span class="ln">94</span><span class="lc" data-py>    mask = color_mask(bgr, color)</span></span><span class="row"><span class="ln">95</span><span class="lc" data-py>    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)</span></span><span class="row"><span class="ln">96</span><span class="lc" data-py>    if not contours:</span></span><span class="row"><span class="ln">97</span><span class="lc" data-py>        return None</span></span><span class="row"><span class="ln">98</span><span class="lc" data-py>    c = max(contours, key=cv2.contourArea)</span></span><span class="row"><span class="ln">99</span><span class="lc" data-py>    (cx, cy), r = cv2.minEnclosingCircle(c)</span></span><span class="row"><span class="ln">100</span><span class="lc" data-py>    if r &lt; min_radius_px or r &gt; max_radius_px:</span></span><span class="row"><span class="ln">101</span><span class="lc" data-py>        return None</span></span><span class="row hl"><span class="ln">102</span><span class="lc" data-py>    if cv2.contourArea(c) / (np.pi * r * r + 1e-6) &lt; min_circularity:</span></span><span class="row"><span class="ln">103</span><span class="lc" data-py>        return None</span></span><span class="row"><span class="ln">104</span><span class="lc" data-py>    w_obj, h_obj = object_extent(mask, cx, cy, r)</span></span><span class="row hl"><span class="ln">105</span><span class="lc" data-py>    if not (min_aspect &lt;= h_obj / w_obj &lt;= max_aspect):</span></span><span class="row"><span class="ln">106</span><span class="lc" data-py>        return None</span></span><span class="row hl"><span class="ln">107</span><span class="lc" data-py>    if red_outside_blob(mask, cx, cy, r) &gt; max_outside_ratio:       # 위아래에 같은 색이 더 있음 → 키 큰 물체의 조각</span></span><span class="row"><span class="ln">108</span><span class="lc" data-py>        return None</span></span><span class="row"><span class="ln">109</span><span class="lc" data-py>    M = cv2.moments(c)</span></span><span class="row"><span class="ln">110</span><span class="lc" data-py>    if M[&quot;m00&quot;] &gt; 0:                                       # 무게중심이 외접원 중심보다 안정적</span></span><span class="row"><span class="ln">111</span><span class="lc" data-py>        cx, cy = M[&quot;m10&quot;] / M[&quot;m00&quot;], M[&quot;m01&quot;] / M[&quot;m00&quot;]</span></span><span class="row"><span class="ln">112</span><span class="lc" data-py>    return float(cx), float(cy), float(r)</span></span></pre>
+    </div>
+  </div>
+</section>
+
+<section class="sec" id="obstacle">
+  <div class="wrap">
+    <div class="head">
+      <span class="pill">05 · 인식 — 낮은 장애물</span>
+      <h2 class="grad">LiDAR가 못 보는 높이를<br>카메라로 메웁니다</h2>
+      <p class="lead">LiDAR는 바닥 위 약 17 cm 높이만 훑습니다. 지름 10 cm 사과는 그 아래라 지도에 없고, 경로가 그 위로 생겨 보라 사과와 부딪혔습니다.</p>
+    </div>
+    <div class="pair flip">
+      <figure class="frame" style="margin:0">
+        <div class="bar2"><i></i><i></i><i></i><span>로봇이 그린 지도 · 뒤따라가는 카메라 · t = 99~111 s</span></div>
+        <video class="clip" src="media/05_low_obstacle.mp4" poster="media/05_low_obstacle_poster.jpg" muted loop playsinline preload="none" aria-label="왼쪽은 로봇이 그리는 지도, 오른쪽은 로봇 뒤에서 본 장면. 105.3초에 초록 사과가 확정되자 지도에 원형 장애물이 생기고 주황 원으로 강조된다"></video>
+        <figcaption class="cap">105.3 s 초록 사과 확정(거리 1.08 m) → 지도에 반경 0.29 m 장애물 등록</figcaption>
+      </figure>
+      <ul class="tiles">
+        <li class="tile"><span class="t">찾기</span><p>빨간 사과 판별을 초록·주황·보라 색으로도 돌립니다. 카메라가 바닥 <span class="num">8.8 cm</span> 높이에 고정돼 있어, 화면에서 아래쪽에 보일수록 가깝습니다. 이 관계로 거리를 구합니다.</p></li>
+        <li class="tile"><span class="t">새기기</span><p>그 자리에 원형 장애물을 지도에 찍습니다. 멀수록 위치 오차가 커서 원을 키우고, <span class="num">2 m</span>보다 먼 추정은 쓰지 않습니다.</p></li>
+        <li class="tile key"><span class="t">지키기</span><p>처음엔 LiDAR 빔이 그 자리를 빈칸으로 지나가며 표시를 1초 만에 지웠습니다. 매 스캔 뒤 다시 벽으로 세워, 경로 계획과 회피가 계속 피하게 했습니다.</p></li>
+      </ul>
+    </div>
+    <div class="editor">
+      <div class="tabs"><span class="tab active">target_detection.py</span><span class="tab">exploration.py</span></div>
+      <pre class="code" data-src="grid_nav/target_detection.py:206-208;grid_nav/exploration.py:74-80,196-205" data-hl="208,79,205"><span class="row file"><span class="ln"></span><span class="lc">grid_nav/target_detection.py</span></span><span class="row"><span class="ln">206</span><span class="lc" data-py>    def obstacle_radius(dist):</span></span><span class="row"><span class="ln">207</span><span class="lc" data-py>        &quot;&quot;&quot;지도에 찍을 장애물 반경: 사과 반지름 0.05 + 여유 0.10 + 거리 비례 위치 불확실성(1차 실행 실측 ≈ 0.3·거리).&quot;&quot;&quot;</span></span><span class="row hl"><span class="ln">208</span><span class="lc" data-py>        return max(OBSTACLE_MIN_RADIUS, 0.15 + 0.25 * max(0.0, dist - 0.5))</span></span><span class="row file"><span class="ln"></span><span class="lc">grid_nav/exploration.py</span></span><span class="row"><span class="ln">74</span><span class="lc" data-py>    def update_map(self, pose, angles, ranges):</span></span><span class="row"><span class="ln">75</span><span class="lc" data-py>        self.grid.update(pose, angles, ranges)</span></span><span class="row"><span class="ln">76</span><span class="lc" data-py>        if self._forced.any():</span></span><span class="row"><span class="ln">77</span><span class="lc" data-py>            # LiDAR 가 못 보는 물체(사과 등)는 빔이 그 자리를 &#x27;빈칸&#x27; 으로 지나가며 log-odds 를 매 스캔 -0.62 씩 깎아</span></span><span class="row"><span class="ln">78</span><span class="lc" data-py>            # 강제 표시가 1 초 안에 지워졌다 (1차 실행: 보라 사과 등록 0.45 m 뒤 30 s 만에 그 자리로 주행해 접촉).</span></span><span class="row hl"><span class="ln">79</span><span class="lc" data-py>            self.grid.log_odds[self._forced] = self.grid.l_clamp</span></span><span class="row"><span class="ln">80</span><span class="lc" data-py>        self._ternary = None                       # 캐시 무효화</span></span><span class="row fold"><span class="ln">⋯</span><span class="lc">115줄 생략</span></span><span class="row"><span class="ln">196</span><span class="lc" data-py>    def mark_obstacle(self, x, y, radius_m=0.15):</span></span><span class="row"><span class="ln">197</span><span class="lc" data-py>        &quot;&quot;&quot;지도에 벽을 강제로 찍는다. LiDAR 가 못 보는 낮은 물체(공, 사과, 고양이)에 걸렸을 때 그 자리를 막아</span></span><span class="row"><span class="ln">198</span><span class="lc" data-py>        A* 가 다시는 그리로 경로를 내지 않게 한다. log-odds 를 최대치로 두어 다음 스캔의 miss 로 금방 지워지지 않게.&quot;&quot;&quot;</span></span><span class="row"><span class="ln">199</span><span class="lc" data-py>        r_c = int(np.ceil(radius_m / self.spec.resolution))</span></span><span class="row"><span class="ln">200</span><span class="lc" data-py>        r0, c0 = self.spec.world_to_grid(x, y)</span></span><span class="row"><span class="ln">201</span><span class="lc" data-py>        rr, cc = np.ogrid[-r_c:r_c + 1, -r_c:r_c + 1]</span></span><span class="row"><span class="ln">202</span><span class="lc" data-py>        disk = (rr ** 2 + cc ** 2) &lt;= r_c ** 2</span></span><span class="row"><span class="ln">203</span><span class="lc" data-py>        R = np.clip(r0 + rr, 0, self.spec.rows - 1); C = np.clip(c0 + cc, 0, self.spec.cols - 1)</span></span><span class="row"><span class="ln">204</span><span class="lc" data-py>        self.grid.log_odds[R, C] = np.where(disk, self.grid.l_clamp, self.grid.log_odds[R, C])</span></span><span class="row hl"><span class="ln">205</span><span class="lc" data-py>        self._forced[R, C] |= disk                 # 이후 스캔의 miss 로 지워지지 않게 고정 (update_map 에서 재적용)</span></span></pre>
+    </div>
+  </div>
+</section>
+
+<section class="sec" id="confirm">
+  <div class="wrap">
+    <div class="head">
+      <span class="pill">06 · 구조 — 접근</span>
+      <h2 class="grad">발견해도 바로 멈추지 않습니다</h2>
+      <p class="lead">사과 앞 0.7 m까지 간 뒤 멈춰서 다시 확인하고(CONFIRM), 확인된 것만 0.35 m까지 붙습니다(APPROACH).</p>
+    </div>
+    <div class="pair">
+      <figure class="frame" style="margin:0">
+        <div class="bar2"><i></i><i></i><i></i><span>위에서 본 장면 · 뒤따라가는 카메라 · t = 212~226 s</span></div>
+        <video class="clip" src="media/06_confirm_approach.mp4" poster="media/06_confirm_approach_poster.jpg" muted loop playsinline preload="none" aria-label="위에서 본 로봇이 사과 주변 0.7 m 파란 원에 들어와 멈추고, 다시 0.35 m 주황 원까지 접근한 뒤 방문을 마친다"></video>
+        <figcaption class="cap">파란 원 = 0.7 m 재확인 지점 · 주황 원 = 0.35 m 도달 판정</figcaption>
+      </figure>
+      <ul class="tiles">
+        <li class="tile"><span class="t">VISIT</span><p>멀리서 본 위치는 오차가 큽니다. <span class="num">2.47 m</span>에서 추정한 좌표가 실제와 <span class="num">0.7 m</span> 어긋나 있었습니다. 그래서 사과가 아니라 사과 앞 0.7 m를 목표로 잡습니다.</p></li>
+        <li class="tile"><span class="t">CONFIRM</span><p>멈춰서 사과를 정면에 두고 같은 기준으로 다시 판별하고 위치를 고칩니다. 못 보면 한 바퀴 돌아 한 번 더 찾고, 그래도 없으면 방문을 미루고 탐색으로 돌아갑니다.</p></li>
+        <li class="tile key"><span class="t">APPROACH</span><p>벽에서 <span class="num">11 cm</span> 떨어진 사과에는 회피 알고리즘의 안전거리가 오히려 접근을 막았습니다. 이 구간만 경로를 직접 따라가 <span class="num">0.35 m</span>까지 붙고, 끝나면 그 자리를 장애물로 남깁니다.</p></li>
+      </ul>
+    </div>
+    <div class="editor">
+      <div class="tabs"><span class="tab active">grid_nav/webots_adapter.py</span></div>
+      <pre class="code" data-src="grid_nav/webots_adapter.py:46-48,442-444,450-464,516-517,523-530" data-hl="46,47,444,455,464,517,526"><span class="row hl"><span class="ln">46</span><span class="lc" data-py>CONFIRM_DIST = 0.70         # 1차 정지·재확인 거리. 카메라(높이 8.8 cm, 수평)에 사과가 화면 안에 들어오는 거리 (0.4 m 이하는 화면 아래로 빠짐)</span></span><span class="row hl"><span class="ln">47</span><span class="lc" data-py>ARRIVE_DIST = 0.35          # 최종 &quot;도달&quot; 판정 거리 (로봇 중심~사과). 당일 규칙에 맞출 것</span></span><span class="row"><span class="ln">48</span><span class="lc" data-py>APPROACH_V = 0.12           # [m/s] 최종 접근 속도 (pure pursuit, DWA 미사용 — 벽 옆 사과는 DWA 여유 거리 안에 있음)</span></span><span class="row fold"><span class="ln">⋯</span><span class="lc">393줄 생략</span></span><span class="row"><span class="ln">442</span><span class="lc" data-py>                    if math.hypot(goal[0] - pose[0], goal[1] - pose[1]) &lt; CONFIRM_DIST:</span></span><span class="row"><span class="ln">443</span><span class="lc" data-py>                        print(f&quot;[{t:.1f}s] 대상 {CONFIRM_DIST} m 안 도착 ({goal[0]:.2f}, {goal[1]:.2f}) → 확인 단계(CONFIRM)&quot;)</span></span><span class="row hl"><span class="ln">444</span><span class="lc" data-py>                        state = &quot;CONFIRM&quot;; confirm_target = goal; confirm_until = t + CONFIRM_HOLD_S</span></span><span class="row fold"><span class="ln">⋯</span><span class="lc">5줄 생략</span></span><span class="row"><span class="ln">450</span><span class="lc" data-py>            if state == &quot;CONFIRM&quot;:</span></span><span class="row"><span class="ln">451</span><span class="lc" data-py>                # 도착 후: 사과를 바라보고 정지 → 카메라로 재확인 → (못 보면 제자리 회전) → 복귀</span></span><span class="row"><span class="ln">452</span><span class="lc" data-py>                if confirm_spin_until &lt; 0 and t &gt;= confirm_until:</span></span><span class="row"><span class="ln">453</span><span class="lc" data-py>                    if confirm_seen:</span></span><span class="row"><span class="ln">454</span><span class="lc" data-py>                        print(f&quot;[{t:.1f}s] ✓ 구조 대상 확인 완료 ({confirm_target[0]:.2f}, {confirm_target[1]:.2f}) → 최종 접근&quot;)</span></span><span class="row hl"><span class="ln">455</span><span class="lc" data-py>                        state = &quot;APPROACH&quot;</span></span><span class="row"><span class="ln">456</span><span class="lc" data-py>                    else:</span></span><span class="row"><span class="ln">457</span><span class="lc" data-py>                        print(f&quot;[{t:.1f}s] 정지 중 대상 미확인 → 제자리 회전으로 재탐색 {CONFIRM_SPIN_S:.0f} s&quot;)</span></span><span class="row"><span class="ln">458</span><span class="lc" data-py>                        confirm_spin_until = t + CONFIRM_SPIN_S</span></span><span class="row"><span class="ln">459</span><span class="lc" data-py>                elif confirm_spin_until &gt; 0 and (t &gt;= confirm_spin_until or confirm_seen):</span></span><span class="row"><span class="ln">460</span><span class="lc" data-py>                    if confirm_seen:</span></span><span class="row"><span class="ln">461</span><span class="lc" data-py>                        state = &quot;APPROACH&quot;</span></span><span class="row"><span class="ln">462</span><span class="lc" data-py>                    else:</span></span><span class="row"><span class="ln">463</span><span class="lc" data-py>                        print(f&quot;[{t:.1f}s] 재확인 실패 → 방문 미인정, 탐색 후 재시도&quot;)</span></span><span class="row hl"><span class="ln">464</span><span class="lc" data-py>                        visits.defer(t); state = &quot;EXPLORE&quot;</span></span><span class="row fold"><span class="ln">⋯</span><span class="lc">51줄 생략</span></span><span class="row"><span class="ln">516</span><span class="lc" data-py>                motion.remember_obstacle(*target, radius=0.18)</span></span><span class="row hl"><span class="ln">517</span><span class="lc" data-py>                planner.mark_obstacle(target[0], target[1], 0.20)      # 방문한 사과도 낮은 장애물: 이후 경로에서 회피 (고정 표시)</span></span><span class="row fold"><span class="ln">⋯</span><span class="lc">5줄 생략</span></span><span class="row"><span class="ln">523</span><span class="lc" data-py>        if state == &quot;APPROACH&quot; and path:</span></span><span class="row"><span class="ln">524</span><span class="lc" data-py>            # 사과는 흔히 벽에서 0.1 m 에 있어 DWA 여유(정적 0.205 / 동적 0.305 m) 안이다 → 최종 0.35 m 접근은</span></span><span class="row"><span class="ln">525</span><span class="lc" data-py>            # pure pursuit + 정면 정지로. (story 실행: DWA 로 0.8 m 에서 350 s 진동, 오프라인 재현 3.8 s 도달)</span></span><span class="row hl"><span class="ln">526</span><span class="lc" data-py>            v, w = lookahead_control(pose, path, v=APPROACH_V)</span></span><span class="row"><span class="ln">527</span><span class="lc" data-py>            front = ranges[np.abs(angles) &lt;= math.radians(30)]</span></span><span class="row"><span class="ln">528</span><span class="lc" data-py>            front = front[np.isfinite(front) &amp; (front &gt; 0.05)]</span></span><span class="row"><span class="ln">529</span><span class="lc" data-py>            if front.size and float(front.min()) &lt; ROBOT_RADIUS + 0.05:</span></span><span class="row"><span class="ln">530</span><span class="lc" data-py>                v = 0.0                                                          # 벽 코앞: 회전만</span></span></pre>
+    </div>
+  </div>
+</section>
+
+<section class="sec" id="dynamic">
+  <div class="wrap">
+    <div class="head">
+      <span class="pill">07 · 안전 — 움직이는 장애물</span>
+      <h2 class="grad">지도에 없는 점은<br>움직이는 것으로 봅니다</h2>
+      <p class="lead">지도는 처음엔 전부 회색(미탐색)이고, LiDAR가 본 부분만 채워집니다. 벽은 같은 칸에 반복해 찍혀 지도에 굳지만, 사람은 계속 움직여 굳지 않습니다.</p>
+    </div>
+    <div class="pair flip">
+      <figure class="frame" style="margin:0">
+        <div class="bar2"><i></i><i></i><i></i><span>위에서 본 장면 · 뒤따라가는 카메라 · t = 348~362 s</span></div>
+        <video class="clip" src="media/07_dynamic_obstacle.mp4" poster="media/07_dynamic_obstacle_poster.jpg" muted loop playsinline preload="none" aria-label="보행자가 로봇 옆을 지나가는 장면. 위에서 본 로봇 주변에 정적 여유 0.205 m 파란 원과 동적 여유 0.305 m 주황 원이 있고 동적 점 수가 바뀐다"></video>
+        <figcaption class="cap">파란 원 = 벽에 대한 여유 0.205 m · 주황 원 = 움직이는 것에 대한 여유 0.305 m</figcaption>
+      </figure>
+      <ul class="tiles">
+        <li class="tile"><span class="t">나누기</span><p>매 스캔마다 LiDAR 점을 지도와 대조합니다. 지도에서 벽으로 굳은 칸에 찍힌 점은 정적, 그 밖의 점은 움직이는 것입니다.</p></li>
+        <li class="tile"><span class="t">피하기</span><p>DWA가 앞으로 1.5초 동안의 궤적 <span class="num">105</span>개를 미리 그려 보고, 움직이는 점에는 <span class="num">10 cm</span> 더 넓은 여유와 속도에 비례한 제동 거리를 요구합니다.</p></li>
+        <li class="tile key"><span class="t">배운 것</span><p>처음엔 ‘같은 5 cm 칸에 8번 연속’이어야 벽으로 봤는데, LiDAR 잡음 <span class="num">1.5 cm</span> 때문에 벽의 3분의 1이 움직이는 것으로 남아 실내에서 멈췄습니다. 지도를 그대로 쓰도록 바꿔 멈춰 있던 시간이 <span class="num">33% → 9%</span>로 줄었습니다.</p></li>
+      </ul>
+    </div>
+    <div class="editor">
+      <div class="tabs"><span class="tab active">motion_control.py</span><span class="tab">dwa.py</span></div>
+      <pre class="code" data-src="grid_nav/motion_control.py:196-196,202-207;grid_nav/dwa.py:126-135" data-hl="196,206,207,132,135"><span class="row file"><span class="ln"></span><span class="lc">grid_nav/motion_control.py</span></span><span class="row hl"><span class="ln">196</span><span class="lc" data-py>        wr, wc = np.nonzero(lo[ra:rb, ca:cb] &gt; STATIC_LOGODDS)</span></span><span class="row fold"><span class="ln">⋯</span><span class="lc">5줄 생략</span></span><span class="row"><span class="ln">202</span><span class="lc" data-py>        # --- 동적: 지도에 벽으로 없는 곳(3x3 이웃 최대 log-odds ≤ STATIC_LOGODDS)에 찍힌 스캔 점 = 사람/새 물체 ---</span></span><span class="row"><span class="ln">203</span><span class="lc" data-py>        if points.shape[0]:</span></span><span class="row"><span class="ln">204</span><span class="lc" data-py>            rr, cc = spec.world_to_grid(points[:, 0], points[:, 1])</span></span><span class="row"><span class="ln">205</span><span class="lc" data-py>            r = np.clip(np.asarray(rr, int), 1, spec.rows - 2); c = np.clip(np.asarray(cc, int), 1, spec.cols - 2)</span></span><span class="row hl"><span class="ln">206</span><span class="lc" data-py>            nb = np.max([lo[r + dr, c + dc] for dr in (-1, 0, 1) for dc in (-1, 0, 1)], axis=0)</span></span><span class="row hl"><span class="ln">207</span><span class="lc" data-py>            dynamic = points[nb &lt;= STATIC_LOGODDS]</span></span><span class="row file"><span class="ln"></span><span class="lc">grid_nav/dwa.py</span></span><span class="row"><span class="ln">126</span><span class="lc" data-py>    if dynamic_xy is not None and len(dynamic_xy) &gt; 0:</span></span><span class="row"><span class="ln">127</span><span class="lc" data-py>        dtree = cKDTree(np.asarray(dynamic_xy, dtype=float).reshape(-1, 2))</span></span><span class="row"><span class="ln">128</span><span class="lc" data-py>        dd, _ = dtree.query(traj[..., :2].reshape(-1, 2))</span></span><span class="row"><span class="ln">129</span><span class="lc" data-py>        clear_dyn = dd.reshape(K, T).min(axis=1)</span></span><span class="row"><span class="ln">130</span><span class="lc" data-py>        physical_clearance = np.minimum(physical_clearance, clear_dyn)</span></span><span class="row"><span class="ln">131</span><span class="lc" data-py>        # 동적 점은 여유(dyn_margin - safety_margin) 를 뺀 &#x27;유효 거리&#x27; 로 환산해 정적 점과 같은 잣대로 비교</span></span><span class="row hl"><span class="ln">132</span><span class="lc" data-py>        clearance = np.minimum(clearance, clear_dyn - (p.dyn_margin - p.safety_margin))</span></span><span class="row"><span class="ln">133</span><span class="lc" data-py>    # 정지거리 v²/(2a) 만큼 여유를 더 둠: 빨리 갈수록 더 멀리서 멈춰야 한다</span></span><span class="row"><span class="ln">134</span><span class="lc" data-py>    brake = V ** 2 / (2.0 * p.a_v)</span></span><span class="row hl"><span class="ln">135</span><span class="lc" data-py>    collide = clearance &lt; p.robot_radius + p.safety_margin + brake</span></span></pre>
+    </div>
+  </div>
+</section>
+
+<section class="sec" id="qa">
+  <div class="wrap">
+    <div class="head">
+      <span class="pill">발표 질의응답</span>
+      <h2 class="grad">심사에서 받은 질문</h2>
+      <p class="lead">발표 현장에서 받은 질문과, 발표 뒤 수치와 사실관계를 확인해 보완한 답변입니다.</p>
+    </div>
+    <div class="qa">
+      <article class="q">
+        <h3><span class="qn">Q1</span>사용한 센서는 무엇이고, 각각 어떤 역할을 했나요?</h3>
+        <p>LiDAR와 카메라가 핵심이고, 위치를 계산하는 휠 엔코더와 나침반을 함께 썼습니다.</p>
+        <div class="scroll"><table>
+          <tr><th>센서</th><th>사양</th><th>역할</th></tr>
+          <tr><td>LiDAR (LDS-01)</td><td>360°, 3.5 m, 바닥 위 약 17 cm 평면</td><td>지도 작성 · 위치 보정(스캔 매칭) · 움직이는 장애물 구분 · 헛바퀴 감지</td></tr>
+          <tr><td>카메라</td><td>전방 60°, 640×480, 바닥 위 8.8 cm</td><td>빨간 사과 판별 · 낮은 장애물(다른 색 사과) 검출 · 사과까지 거리 추정</td></tr>
+          <tr><td>휠 엔코더</td><td>좌우 바퀴 회전량</td><td>이동 거리 계산(오도메트리)</td></tr>
+          <tr><td>나침반</td><td>절대 방향</td><td>로봇이 바라보는 방향</td></tr>
+        </table></div>
+        <p class="say">엔코더와 나침반으로 위치를 계속 계산하고, 미끄러짐으로 쌓이는 오차는 LiDAR 스캔을 지도에 맞춰 보정해 위치 오차를 최대 0.2 m 안팎으로 유지했습니다. 시뮬레이터의 정답 위치는 개발 중 오차를 재는 데만 썼고 제어에는 쓰지 않았습니다.</p>
+      </article>
+      <article class="q">
+        <h3><span class="qn">Q2</span>잘 안 되다가 방법을 바꿔 개선한 사례가 있나요?</h3>
+        <p>모두 실패한 실행의 지도를 저장해 두고 다시 돌려 원인을 수치로 확인한 뒤 고쳤습니다.</p>
+        <div class="scroll"><table>
+          <tr><th>문제</th><th>원인</th><th>개선</th><th>결과</th></tr>
+          <tr><td>방을 오가며 시간 낭비</td><td>직선거리로 목표 선택</td><td>BFS 경로거리 + 목표 고정</td><td>첫 사과 381 s → 234 s</td></tr>
+          <tr><td>사과를 옆에 두고 지나침</td><td>카메라는 60°만 봄</td><td>카메라 미확인 칸이 많으면 제자리 회전</td><td>가려진 2번 사과를 회전 중 발견</td></tr>
+          <tr><td>보라 사과에 충돌</td><td>LiDAR 아래 높이 + 지도 표시가 1초 만에 지워짐</td><td>카메라로 검출해 지도에 강제 고정</td><td>시연 완주 접촉 0</td></tr>
+          <tr><td>벽 앞에서 멈춤</td><td>LiDAR 잡음으로 벽을 움직이는 물체로 오판</td><td>지도 기반 판정</td><td>정지 시간 33% → 9%</td></tr>
+          <tr><td>소화기를 사과로 오인</td><td>색만 봄</td><td>원형도 · 종횡비 · 두 거리 일치</td><td>117장 중 오탐 0</td></tr>
+          <tr><td>0.4 m에서 재확인 실패</td><td>카메라가 낮아 사과가 화면 밖</td><td>0.7 m에서 확인 후 접근</td><td>재확인 성공</td></tr>
+        </table></div>
+        <p>제자리 회전과 낮은 장애물 검출은 별개입니다. 회전은 카메라가 못 본 바닥을 훑어 사과를 놓치지 않기 위한 것이고, 낮은 장애물 검출은 주행 내내 카메라로 돌아갑니다.</p>
+      </article>
+      <article class="q">
+        <h3><span class="qn">Q3</span>이 로봇을 현실 상황에서 어떻게 확장할 수 있을까요?</h3>
+        <p>소리로 요구조자를 먼저 찾는 방향을 구상했습니다. 로봇에 소리를 내는 <b>스피커</b>와 소리를 듣는 <b>마이크 배열</b>을 답니다. 방향을 알려면 마이크가 2개 이상 필요하고(2개면 좌우만 구분되어 보통 3~4개를 원형으로 배치), 소리가 각 마이크에 도착하는 <b>시간 차(TDOA, Time Difference of Arrival)</b>로 방향을 계산합니다.</p>
+        <p>현실에서는 요구조자가 직접 소리를 내니 그쪽에 장치가 필요 없습니다. 시뮬레이션에서는 주어진 맵을 최소한으로 바꾸기 위해, 사과에 소리를 내는 장치를 달아 사람을 흉내 내는 방식을 택했습니다.</p>
+        <p class="say">로봇이 신호음을 내면 요구조자가 외치고, 로봇은 그 방향을 지도 탐색보다 먼저 확인해 지도를 다 그리기 전에 요구조자에게 갈 수 있습니다.</p>
+        <p>발표 시점에는 동작하는 시뮬레이션이 없었습니다. 이후 <code>feat/sound</code> 브랜치에 뼈대(소리 상호작용 월드, 외치는 요구조자 컨트롤러, 방향·세기로 위치를 추정하는 모듈, 소리 쪽으로 가는 상태)를 만들어 두었고, 검증은 다음 과제로 남겼습니다. Webots에는 마이크 장치가 없어 무선 송수신 장치로 소리를 흉내 냅니다.</p>
+      </article>
+      <article class="q">
+        <h3><span class="qn">Q4</span>단순 Greedy로 목표를 고르면 계속 왔다 갔다 하지 않나요?</h3>
+        <p>맞습니다. 같은 문제로 고생했습니다. 목표는 1초마다 다시 계산되는데, 로봇이 움직일 때마다 지도가 새로 채워지면서 1등 후보가 두 곳 사이를 오갔습니다. 수정 전 실행에서는 목표 변경 35회가 모두 도착 전에 일어났습니다.</p>
+        <p>두 가지로 해결했습니다. 거리를 벽을 돌아가는 실제 경로 길이(BFS)로 재서 같은 방의 경계를 먼저 처리하게 했고, 목표를 한 번 정하면 도착 전에는 바꾸지 않게 했습니다. 같은 지도로 재생해 비교하니 목표 변경은 32 → 25회, 다 보지 못한 칸은 14,641 → 8,108개로 줄었습니다.</p>
+        <p>다만 무조건 고정하지는 않습니다. 고정이 오히려 손해인 경우를 예외로 두었습니다.</p>
+        <div class="scroll"><table>
+          <tr><th>목표를 바꾸는 조건</th><th>막는 부작용</th></tr>
+          <tr><td>새 후보가 남은 거리의 절반 미만</td><td>가는 길 바로 옆에 새 경계가 나타났는데 무시하는 것</td></tr>
+          <tr><td>목표 칸이 벽이 되거나 지날 수 없게 됨</td><td>의미 없어진 목표에 매달려 멈추는 것</td></tr>
+          <tr><td>목표 주변 0.5 m에 경계가 더 이상 없음</td><td>가는 동안 이미 다 봐서 갈 이유가 사라진 목표</td></tr>
+          <tr><td>15초 동안 진척 없음</td><td>갈 수 없는 목표 (90초 동안 후보에서 제외)</td></tr>
+        </table></div>
+        <p class="say">새 후보가 남은 거리의 60% 정도일 때는 바꾸지 않아 조금 돌아가는 경우가 생깁니다. 진동을 없애는 대신 감수한 손해입니다. 고른 목표까지의 길은 A*로 계산하므로 최단 경로입니다.</p>
+      </article>
+    </div>
+  </div>
+</section>
+</main>
+
+<footer>
+  <div class="wrap grid">
+    <div class="tile"><span class="t">저장소</span><p><a href="https://github.com/blacktae03/pnu-techweek-amr">github.com/blacktae03/pnu-techweek-amr</a><br>태그 v1.0-hackathon</p></div>
+    <div class="tile"><span class="t">팀</span><p>A조 지도·탐색·비전·통합 — blacktae03, ziuneeeeeee<br>B조 위치 추정·DWA — mongdmin, badyeun</p></div>
+    <div class="tile"><span class="t">환경</span><p>Webots R2025a · TurtleBot3 Burger · Python 3.10<br>코드 블록은 저장소의 실제 줄 번호입니다.</p></div>
+  </div>
+</footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>
+(function () {
+  var reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  // 1) 코드 줄 하이라이트
+  if (window.hljs) document.querySelectorAll(".code .lc[data-py]").forEach(function (el) {
+    try { el.innerHTML = hljs.highlight(el.textContent, { language: "python", ignoreIllegals: true }).value; } catch (e) {}
+  });
+
+  // 2) 히어로 레이더: 고정 점 격자는 한 번만 그리고, 빔과 빛 받은 점만 매 프레임 갱신
+  var cv = document.getElementById("radar"), ctx = cv.getContext("2d"), base = document.createElement("canvas"), bctx = base.getContext("2d");
+  var dots = [], hot = [], W = 0, H = 0, cx = 0, cy = 0, ang = 0, last = 0, running = false, visible = true, dpr = 1;
+  function setup() {
+    var r = cv.getBoundingClientRect(); dpr = 1;
+    W = r.width; H = r.height; cv.width = base.width = Math.round(W * dpr); cv.height = base.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0); bctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    cx = W / 2; cy = Math.min(H * 0.42, 360); dots = []; hot = [];
+    var g = 26, seed = 7; function rnd() { seed = (seed * 9301 + 49297) % 233280; return seed / 233280; }
+    bctx.clearRect(0, 0, W, H);
+    for (var y = 13; y < H; y += g) for (var x = 13; x < W; x += g) {
+      var p = { x: x, y: y, a: (Math.atan2(y - cy, x - cx) + Math.PI * 2) % (Math.PI * 2), d: Math.hypot(x - cx, y - cy), heat: 0, wall: rnd() < 0.07 };
+      dots.push(p); bctx.fillStyle = p.wall ? "rgba(255,138,92,.07)" : "rgba(216,236,248,.06)"; bctx.fillRect(x - 1, y - 1, 2, 2);
+    }
+    dots.sort(function (a, b) { return a.a - b.a; });
+    if (reduce) { ctx.drawImage(base, 0, 0, W, H); }
+  }
+  function firstIndex(a) { var lo = 0, hi = dots.length; while (lo < hi) { var m = (lo + hi) >> 1; if (dots[m].a < a) lo = m + 1; else hi = m; } return lo; }
+  function frame(t) {
+    if (!running) return;
+    var dt = Math.min(0.05, (t - last) / 1000 || 0); last = t;
+    var prev = ang; ang = (ang + dt * 1.1) % (Math.PI * 2);
+    var maxR = Math.min(Math.hypot(W, H) * 0.62, 1400);
+    // 이번 프레임에 빔이 지나간 각도 구간의 점만 점등
+    var a0 = prev, a1 = ang < prev ? ang + Math.PI * 2 : ang;
+    for (var k = 0; k < 2; k++) {
+      var lo = a0 - k * Math.PI * 2, hi = a1 - k * Math.PI * 2;
+      for (var i = firstIndex(Math.max(0, lo)); i < dots.length && dots[i].a <= hi; i++) { var p = dots[i]; if (p.d < maxR) { if (p.heat < 0.05) hot.push(p); p.heat = 1; } }
+    }
+    ctx.clearRect(0, 0, W, H); ctx.drawImage(base, 0, 0, W, H);
+    var grd = ctx.createRadialGradient(cx, cy, 0, cx, cy, maxR);
+    grd.addColorStop(0, "rgba(152,192,239,0.10)"); grd.addColorStop(1, "rgba(152,192,239,0)");
+    ctx.beginPath(); ctx.moveTo(cx, cy); ctx.arc(cx, cy, maxR, ang - 0.55, ang); ctx.closePath(); ctx.fillStyle = grd; ctx.fill();
+    var keep = [];
+    for (var j = 0; j < hot.length; j++) {
+      var q = hot[j]; q.heat *= 0.985; if (q.heat < 0.05) { q.heat = 0; continue; } keep.push(q);
+      ctx.fillStyle = q.wall ? "rgba(255,138,92," + (q.heat * 0.9) + ")" : "rgba(216,236,248," + (q.heat * 0.45) + ")";
+      var s = q.wall ? 2.2 : 1.6; ctx.fillRect(q.x - s / 2, q.y - s / 2, s, s);
+    }
+    hot = keep;
+    ctx.fillStyle = "rgba(216,236,248,0.9)"; ctx.beginPath(); ctx.arc(cx, cy, 3, 0, Math.PI * 2); ctx.fill();
+    requestAnimationFrame(frame);
+  }
+  function update() { var should = !reduce && visible && !document.hidden; if (should && !running) { running = true; last = performance.now(); requestAnimationFrame(frame); } else if (!should) running = false; }
+  setup(); if (reduce) ctx.drawImage(base, 0, 0, W, H);
+  var rt; window.addEventListener("resize", function () { clearTimeout(rt); rt = setTimeout(setup, 150); });
+  document.addEventListener("visibilitychange", update);
+  if ("IntersectionObserver" in window) {
+    new IntersectionObserver(function (es) { visible = es[0].isIntersecting; update(); }).observe(document.querySelector(".hero"));
+    // 테두리 빛은 화면에 보이는 틀만 돈다
+    var io = new IntersectionObserver(function (es) { es.forEach(function (e) { e.target.classList.toggle("live", e.isIntersecting); }); }, { rootMargin: "100px" });
+    document.querySelectorAll(".frame.orbit").forEach(function (f) { io.observe(f); });
+  } else { document.querySelectorAll(".frame").forEach(function (f) { f.classList.add("live"); }); }
+  update();
+
+  // 2-1) 섹션 클립: 화면에 보일 때만 재생 (GIF 대신 MP4라 메모리·CPU 부담이 작다)
+  var clips = document.querySelectorAll("video.clip");
+  if (reduce) clips.forEach(function (v) { v.controls = true; v.preload = "metadata"; });
+  else if ("IntersectionObserver" in window) {
+    var cio = new IntersectionObserver(function (es) { es.forEach(function (e) {
+      var v = e.target; if (e.isIntersecting) { var p = v.play(); if (p && p.catch) p.catch(function () { v.controls = true; }); } else v.pause();
+    }); }, { threshold: 0.25 });
+    clips.forEach(function (v) { cio.observe(v); });
+  } else clips.forEach(function (v) { v.autoplay = true; });
+
+  // 3) 영상 시각 → 시뮬 시각 → 현재 상태 칩 점등
+  var TL = {"states": [[3.1, "EXPLORE"], [203.8, "VISIT"], [218.1, "CONFIRM"], [221.2, "APPROACH"], [223.2, "EXPLORE"], [528.4, "VISIT"], [529.4, "CONFIRM"], [532.5, "APPROACH"], [536.6, "RETURN"], [577.5, "DONE"]], "t0": 0.256, "rate": 9.6};
+  var vid = document.getElementById("run"), chips = document.querySelectorAll("#ribbon .chip"), prog = document.getElementById("prog"), simt = document.getElementById("simt");
+  var order = ["EXPLORE", "VISIT", "CONFIRM", "APPROACH", "RETURN", "DONE"];
+  function stateAt(s) { var cur = "EXPLORE"; for (var i = 0; i < TL.states.length; i++) if (TL.states[i][0] <= s) cur = TL.states[i][1]; return cur; }
+  function sync() {
+    var s = TL.t0 + vid.currentTime * TL.rate, st = stateAt(s), k = order.indexOf(st);
+    chips.forEach(function (c, i) { c.classList.toggle("on", i === k); c.classList.toggle("done", i < k || (st === "DONE" && i < 5)); });
+    simt.textContent = "시뮬 시각 " + s.toFixed(1) + " s · " + st;
+    if (vid.duration) prog.style.width = (100 * vid.currentTime / vid.duration) + "%";
+  }
+  ["timeupdate", "seeked", "loadedmetadata"].forEach(function (e) { vid.addEventListener(e, sync); }); sync();
+
+  // 4) 현재 섹션 표시
+  var secs = Array.prototype.slice.call(document.querySelectorAll("main > section")), links = Array.prototype.slice.call(document.querySelectorAll(".toc a"));
+  function mark() { var y = window.scrollY + 140, idx = 0; secs.forEach(function (s, i) { if (s.offsetTop <= y) idx = i; }); links.forEach(function (a, k) { a.setAttribute("aria-current", k === idx ? "true" : "false"); }); }
+  window.addEventListener("scroll", mark, { passive: true }); mark();
+})();
+</script>
+
+</body>
+</html>
